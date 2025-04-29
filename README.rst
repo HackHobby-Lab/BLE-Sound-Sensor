@@ -9,5 +9,5 @@
 Dev Notes
 =============
 
-I have freakin no idea how it work but for sure it does work
+Make sure to build it for the specific board and do take Tea while working
 
