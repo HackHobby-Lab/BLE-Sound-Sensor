@@ -6,11 +6,8 @@
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 
-#include "micsense_service.h"
-
 #define SLEEP_TIME_MS 100
-float db =0.0;
-int16_t db_int = 0;
+
 #define ADC_NODE DT_NODELABEL(adc)
 static const struct device *adc_dev = DEVICE_DT_GET(ADC_NODE);
 
@@ -36,35 +33,11 @@ struct adc_sequence sequence = {
     .channels = BIT(ADC_CHANNEL),
     .buffer = sampleBuffer,
     .buffer_size = sizeof(sampleBuffer),
-    .resolution = ADC_RESOLUTION
-};
-
-static const struct bt_data ad[] = 
-{
-    BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-    BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_SET_THRESHOLD_SERVICE_VAL),
-};
-
+    .resolution = ADC_RESOLUTION};
 
 int main(void)
 {
     int err;
-
-    if (init_ble() == 0) {
-        printf("BLE Initialized successfully.\n");
-    } else {
-        printf("BLE Initialization failed.\n");
-    }
-    err = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
-    if (err) {
-        printf("Advertising failed to start(err %d)\n", err);
-        return err;
-    }
-
-    
-
-
-
     if (!device_is_ready(adc_dev))
     {
         printf("ADC Device not read\n");
@@ -79,8 +52,7 @@ int main(void)
     }
 
     while (1)
-    {   
-        
+    {
         err = adc_read(adc_dev, &sequence);
         if (err != 0)
         {
@@ -103,40 +75,10 @@ int main(void)
         // Now do dB calculation
         if (ac_component == 0)
             ac_component = 1; // avoid log10(0)
-        
-        db = 20.0f * log10f((float)ac_component / 1.0f);
-        if (db >= threshold_value)      
-        {   
-            alertThreshold = 1;
-            if (my_connection) {
-                int err = bt_gatt_notify(my_connection, alert_threshold_attr, &alertThreshold, sizeof(alertThreshold));
-                if (err) {
-                    printk("Failed to notify (err %d)\n", err);
-                } else {
-                    printk("Notification sent: %d\n", alertThreshold);
-                }
-            }
-        }
-        else{
-            alertThreshold = 0;
-        }
-        if (sound_streaming_enabled > 0)      
-        { 
-            if (my_connection) {
-                db_int = (int16_t)(db);
-                int err = bt_gatt_notify(my_connection, getStreamService_attr, &db_int, sizeof(db_int));
-                if (err) {
-                    printk("Failed to notify (err %d)\n", err);
-                } else {
-                    printk("Notification sent: %d\n", db_int);
-                }
-            }
-        }
-        // else{
-        //     sound_streaming_enabled = 0;
-        // }
 
-        // printf("Sound Level: %.2f dB\n", db);
+        float db = 20.0f * log10f((float)ac_component / 1.0f);
+
+        printf("Sound Level: %.2f dB\n", db);
 
         k_msleep(SLEEP_TIME_MS);
     }
