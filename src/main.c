@@ -14,11 +14,15 @@ int16_t db_int = 0;
 #define ADC_NODE DT_NODELABEL(adc)
 static const struct device *adc_dev = DEVICE_DT_GET(ADC_NODE);
 
-#define ADC_RESOLUTION 10
+#define ADC_RESOLUTION 12
 #define ADC_CHANNEL 0
 #define ADC_PORT SAADC_CH_PSELP_PSELP_AnalogInput0 // AIN0
 #define ADC_REFERENCE ADC_REF_INTERNAL             // 0.6V
-#define ADC_GAIN ADC_GAIN_1_5                      // ADC_REFERENCE * 5
+#define ADC_GAIN ADC_GAIN_1_6                      // ADC_REFERENCE * 5
+
+
+#define BATTERY_ADC_CHANNEL 1 //Battery 
+#define BATTERY_ADC_PORT SAADC_CH_PSELP_PSELP_AnalogInput1 // AIN1
 
 struct adc_channel_cfg chl0_cfg = {
     .gain = ADC_GAIN,
@@ -30,12 +34,33 @@ struct adc_channel_cfg chl0_cfg = {
 #endif
 };
 
+// Config for the battery ADC
+struct adc_channel_cfg battery_ch_cfg = {
+    .gain = ADC_GAIN,
+    .reference = ADC_REFERENCE,
+    .acquisition_time = ADC_ACQ_TIME_DEFAULT,
+    .channel_id = BATTERY_ADC_CHANNEL,
+#ifdef CONFIG_ADC_NRFX_SAADC
+    .input_positive = BATTERY_ADC_PORT
+#endif
+};
+
 int16_t sampleBuffer[1];
 
 struct adc_sequence sequence = {
     .channels = BIT(ADC_CHANNEL),
     .buffer = sampleBuffer,
     .buffer_size = sizeof(sampleBuffer),
+    .resolution = ADC_RESOLUTION
+};
+
+//ADC Battery Sequence
+int16_t battery_sample[1];
+
+struct adc_sequence battery_sequence = {
+    .channels = BIT(BATTERY_ADC_CHANNEL),
+    .buffer = battery_sample,
+    .buffer_size = sizeof(battery_sample),
     .resolution = ADC_RESOLUTION
 };
 
@@ -77,6 +102,14 @@ int main(void)
         printf("ADC Setup failedwith error %d.\n", err);
         return;
     }
+
+    //ADC Battery Setup
+    err = adc_channel_setup(adc_dev, &battery_ch_cfg);
+    if (err != 0) {
+        printf("Battery ADC Setup failed with error %d.\n", err);
+        return;
+    }
+
 
     while (1)
     {   
@@ -137,6 +170,23 @@ int main(void)
         // }
 
         // printf("Sound Level: %.2f dB\n", db);
+
+
+
+         // --- Battery Voltage Read ---
+         err = adc_read(adc_dev, &battery_sequence);
+         if (err != 0) {
+             printf("Battery ADC reading failed: %d\n", err);
+             continue;
+         }
+ 
+         int32_t battery_mv = battery_sample[0];
+         int32_t battery_vref = adc_ref_internal(adc_dev);
+         adc_raw_to_millivolts(battery_vref, ADC_GAIN, ADC_RESOLUTION, &battery_mv);
+ 
+         // If using a voltage divider (e.g., R1 = R2), multiply accordingly:
+         float battery_voltage = battery_mv * 1.0f / 1000.0f; // Convert to volts
+         printf("Battery Voltage: %.2f V\n", battery_voltage);
 
         k_msleep(SLEEP_TIME_MS);
     }
