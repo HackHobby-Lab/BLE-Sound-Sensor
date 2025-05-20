@@ -8,6 +8,11 @@
 
 #include "micsense_service.h"
 
+#define AUDIO_BUFFER_SIZE 16000 // e.g., 1 second at 16 kHz
+int16_t audio_buffer[AUDIO_BUFFER_SIZE];
+volatile uint32_t audio_write_index = 0;
+
+
 #define SLEEP_TIME_MS 100
 float db =0.0;
 int16_t db_int = 0;
@@ -121,10 +126,22 @@ int main(void)
             return 0;
         }
 
+        
+
         int32_t mv_value = sampleBuffer[0];
         // Convert raw ADC to millivolts
         int32_t adc_vref = adc_ref_internal(adc_dev);
         adc_raw_to_millivolts(adc_vref, ADC_GAIN, ADC_RESOLUTION, &mv_value);
+
+        // Store the raw ADC sample
+        audio_buffer[audio_write_index++] = sampleBuffer[0];
+
+        // Wrap around if full
+        if (audio_write_index >= AUDIO_BUFFER_SIZE) {
+            audio_write_index = 0; // Circular buffer
+        }
+        printf("%d\n", audio_buffer[audio_write_index]);
+
 
         // Remove fixed DC bias (~1650mV if Vcc = 3.3V)
         int32_t ac_component = mv_value - 1500; // Centered around 0
@@ -153,6 +170,8 @@ int main(void)
         else{
             alertThreshold = 0;
         }
+
+        
         if (sound_streaming_enabled > 0)      
         { 
             if (my_connection) {
@@ -190,4 +209,26 @@ int main(void)
 
         k_msleep(SLEEP_TIME_MS);
     }
+
+    // while (1)
+    // {
+    //     err = adc_read(adc_dev, &sequence);
+    //     if (err != 0) {
+    //         continue;
+    //     }
+    
+    //     // Remove DC bias (center around 0)
+    //     int16_t sample = sampleBuffer[0] - 1500;
+    
+    //     // Optional: scale to 16-bit range
+    //     sample <<= 4;
+    
+    //     // Print to serial for logging
+    //     printf("%d\r\n", sample);
+    
+    //     // Wait to match desired sampling rate
+    //     k_busy_wait(65); // ~16kHz
+    // }
+    
+
 }
