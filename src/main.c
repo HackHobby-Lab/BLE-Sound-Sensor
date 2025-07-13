@@ -5,12 +5,39 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
-
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/gpio.h>
 #include "micsense_service.h"
+#include <zephyr/drivers/led_strip.h>
+#include <stddef.h>
+#include <string.h>
+#include <errno.h>
+#include <soc.h>
 
+#define STRIP_NODE        DT_ALIAS(led_strip)
+#define STRIP_NUM_PIXELS  DT_PROP(STRIP_NODE, chain_length)
+#define DELAY_TIME        K_MSEC(5)
+
+struct led_rgb pixels[STRIP_NUM_PIXELS];
+const struct device *strip = DEVICE_DT_GET(STRIP_NODE);
+
+
+#define EN_PIN_NODE  DT_NODELABEL(user_output_pin)
+
+static const struct gpio_dt_spec pwr_En = GPIO_DT_SPEC_GET(EN_PIN_NODE, gpios);
+
+#define PAIR_PIN DT_NODELABEL(user_input_pin)
+static const struct gpio_dt_spec pair_pin = GPIO_DT_SPEC_GET(PAIR_PIN, gpios);
+
+static struct gpio_callback input_cb_data;
+
+bool status = false;
+int count = 0;
 #define AUDIO_BUFFER_SIZE 16000 // e.g., 1 second at 16 kHz
 int16_t audio_buffer[AUDIO_BUFFER_SIZE];
 volatile uint32_t audio_write_index = 0;
+
 
 
 #define SLEEP_TIME_MS 100
@@ -75,25 +102,68 @@ static const struct bt_data ad[] =
     BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_SET_THRESHOLD_SERVICE_VAL),
 };
 
+void input_pin_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    printf("Interrupt! Pin state: %d\n", gpio_pin_get_dt(&pair_pin));
+    status != status;
+    count = count +1;
+    
+}
+
+void update_led_strip(uint8_t r, uint8_t g, uint8_t b)
+{
+    // Set the RGB values for all the pixels
+    for (int i = 0; i < STRIP_NUM_PIXELS; i++) {
+        pixels[i].r = r;
+        pixels[i].g = g;
+        pixels[i].b = b;
+    }
+
+    // Update the LED strip
+    led_strip_update_rgb(strip, pixels, STRIP_NUM_PIXELS);
+}
+
 
 int main(void)
 {
     int err;
+    printk("Startup\n");
+    update_led_strip(0, 0, 255);
 
-    if (init_ble() == 0) {
-        printf("BLE Initialized successfully.\n");
-    } else {
-        printf("BLE Initialization failed.\n");
+     if (!device_is_ready(pwr_En.port)) {
+        printk("GPIO port not ready\n");
+        return;
     }
-    err = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
-    if (err) {
-        printf("Advertising failed to start(err %d)\n", err);
-        return err;
+    gpio_pin_configure_dt(&pwr_En, GPIO_OUTPUT_ACTIVE); // Start HIGH (ACTIVE)
+    gpio_pin_set_dt(&pwr_En, 1); // Set HIGH again
+
+
+    // Check if the device is ready
+    if (!gpio_is_ready_dt(&pair_pin)) {
+        return;
     }
 
-    
+    // Configure the pin as input
+    gpio_pin_configure_dt(&pair_pin, GPIO_INPUT);
+    gpio_pin_interrupt_configure_dt(&pair_pin, GPIO_INT_EDGE_TO_ACTIVE);
+    // Initialize and add the callback
+    gpio_init_callback(&input_cb_data, input_pin_isr, BIT(pair_pin.pin));
+    gpio_add_callback(pair_pin.port, &input_cb_data);
 
-
+        if (init_ble() == 0)
+        {
+            printf("BLE Initialized successfully.\n");
+        }
+        else
+        {
+            printf("BLE Initialization failed.\n");
+        }
+        err = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
+        if (err)
+        {
+            printf("Advertising failed to start(err %d)\n", err);
+            return err;
+        }
 
     if (!device_is_ready(adc_dev))
     {
@@ -118,7 +188,28 @@ int main(void)
 
     while (1)
     {   
+        if (count == 1) 
+        {
+            update_led_strip(255, 0, 0);
+        }
+        if (count == 2) 
+        {
+            update_led_strip(0, 255, 0);
+        }
+        if (count == 3) 
+        {
+            update_led_strip(0, 0, 255);
+        }
+        if (count == 4) 
+        {
+            update_led_strip(255, 255, 255);
+        }
+        if (count == 5) 
+        {
+            count = 0;
+        }
         
+
         err = adc_read(adc_dev, &sequence);
         if (err != 0)
         {

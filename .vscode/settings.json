@@ -4,6 +4,7 @@
         "bluetooth.h": "c",
         "conn.h": "c",
         "soc.h": "c",
-        "gatt.h": "c"
+        "gatt.h": "c",
+        "micsense_service.h": "c"
     }
 }
