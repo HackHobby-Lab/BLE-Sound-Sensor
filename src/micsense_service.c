@@ -37,12 +37,12 @@ volatile bool ble_ready = false;
 struct bt_conn *my_connection = NULL;
 bool notify_enabled = false;
 
-uint8_t threshold_value = 0;    // Example threshold
+uint8_t threshold_value  = 50;    // Example threshold
 static uint8_t battery_level = 40;       // Simulated battery %
 static uint8_t sound_level = 0;          // Simulated sound
 uint8_t sound_streaming_enabled = 0;
 static bool threshold_alert_enabled = false;
-uint8_t alertThreshold = 0;
+uint8_t alertThreshold;
 
 
 int MICSENSE_service_init(void)
@@ -64,6 +64,7 @@ static ssize_t on_receive(struct bt_conn *conn,
     memcpy(&received_value, buf, sizeof(uint8_t));
     threshold_value = received_value;
     printk("Received integer: %d\n", received_value);
+    printk("------Value stored in threshold variable: %d\n", threshold_value);
     return len;  // Return the length of data written
 }
 
