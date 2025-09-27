@@ -104,52 +104,61 @@ static const struct bt_data ad[] =
         BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_SET_THRESHOLD_SERVICE_VAL),
 };
 
+static struct k_timer button_timer;
+static bool long_press_detected = false;
+
 static void button_work_handler(struct k_work *work)
 {
-    int err;
-
-    /* Toggle BLE advertising safely in thread context */
-    if (advertising_active)
-    {
-        err = bt_le_adv_stop();
-        if (err)
-        {
-            printk("bt_le_adv_stop failed: %d\n", err);
+    if (k_timer_status_get(&button_timer) > 0) {
+        // Timer expired before release → long press
+        printk("Long press detected!\n");
+        gpio_pin_set_dt(&pwr_En, 0);
+        while (1) {
+            k_sleep(K_FOREVER);
         }
-        else
-        {
-            advertising_active = false;
-            printk("BLE advertising stopped (worker)\n");
-            update_led_strip(255, 0, 0); // Red when not advertising
-        }
-    }
-    else
-    {
-        err = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
-        if (err)
-        {
-            printk("Advertising failed to start (err %d)\n", err);
-        }
-        else
-        {
-            advertising_active = true;
-            printk("BLE advertising started (worker)\n");
-            update_led_strip(0, 255, 0); // Green when advertising
+    } else {
+        // Released before timer expired → short press
+        printk("Short press detected. Toggling BLE advertising...\n");
+        int err;
+        if (advertising_active) {
+            err = bt_le_adv_stop();
+            if (!err) {
+                advertising_active = false;
+                update_led_strip(255, 0, 0);
+            }
+        } else {
+            err = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
+            if (!err) {
+                advertising_active = true;
+                update_led_strip(0, 255, 0);
+            }
         }
     }
 
-    /* maintain your other state toggles if you still want them */
-    status = !status;
-    count++;
+    k_timer_stop(&button_timer); // cleanup
 }
 
-/* ISR now only schedules the work — safe and non-blocking */
+
+
+void button_timer_expiry(struct k_timer *timer_id)
+{
+    long_press_detected = true;
+    k_work_submit(&button_work); // Submit the work handler for long press
+}
+
+
+
 void input_pin_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    /* avoid calling blocking APIs from ISR. Just submit work */
-    /* optional: a short print (keep it small) */
-    printk("Button IRQ: scheduling work\n");
-    k_work_submit(&button_work);
+    bool pin_state = gpio_pin_get_dt(&pair_pin);
+
+    if (pin_state) {
+        // button pressed → start timer
+        k_timer_start(&button_timer, K_SECONDS(3), K_NO_WAIT);
+    } else {
+        // button released → schedule work to decide short/long
+        k_work_submit(&button_work);
+    }
 }
 
 void update_led_strip(uint8_t r, uint8_t g, uint8_t b)
@@ -271,6 +280,8 @@ int main(void)
     update_led_strip(0, 0, 255);
     /* initialize the work item (do this before gpio_add_callback) */
     k_work_init(&button_work, button_work_handler);
+    // Initialize the button timer
+    k_timer_init(&button_timer, button_timer_expiry, NULL);
 
     if (!device_is_ready(pwr_En.port))
     {
@@ -288,7 +299,7 @@ int main(void)
 
     // Configure the pin as input
     gpio_pin_configure_dt(&pair_pin, GPIO_INPUT);
-    gpio_pin_interrupt_configure_dt(&pair_pin, GPIO_INT_EDGE_TO_ACTIVE);
+    gpio_pin_interrupt_configure_dt(&pair_pin, GPIO_INT_EDGE_BOTH);
     /* Initialize and add the callback */
     gpio_init_callback(&input_cb_data, input_pin_isr, BIT(pair_pin.pin));
     gpio_add_callback(pair_pin.port, &input_cb_data);
@@ -346,14 +357,16 @@ int main(void)
         // {
         //     update_led_strip(0, 0, 255);
         // }
-        // if (count == 4)
-        // {
-        //     update_led_strip(255, 255, 255);
-        // }
-        // if (count == 5)
-        // {
-        //     count = 0;
-        // }
+        if (count == 4)
+        {
+            update_led_strip(255, 255, 255);
+                gpio_pin_set_dt(&pwr_En, 0);                        // Set HIGH again
+
+        }
+        if (count == 5)
+        {
+            count = 0;
+        }
 
         // Fixed-size frame sampling with DC blocking HPF and RMS
         int32_t sum_sq = 0;
