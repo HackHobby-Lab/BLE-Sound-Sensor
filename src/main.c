@@ -25,6 +25,15 @@
 #define STRIP_NUM_PIXELS DT_PROP(STRIP_NODE, chain_length)
 #define DELAY_TIME K_MSEC(5)
 
+#define LED_BLINK_ADV_SLOW K_MSEC(1000)  // Slow blinking (yellow) for advertising
+#define LED_BLINK_CONN_FAST K_MSEC(200) // Fast blinking (orange) for connecting
+#define LED_CONNECTED_GREEN K_MSEC(0)   // Solid green for connected
+
+
+static enum ble_state current_ble_state = BLE_STATE_IDLE;
+static struct k_timer led_blink_timer;
+static bool led_on = false;
+
 struct led_rgb pixels[STRIP_NUM_PIXELS];
 const struct device *strip = DEVICE_DT_GET(STRIP_NODE);
 
@@ -124,13 +133,13 @@ static void button_work_handler(struct k_work *work)
             err = bt_le_adv_stop();
             if (!err) {
                 advertising_active = false;
-                update_led_strip(255, 0, 0);
+                update_led_state(BLE_STATE_IDLE);
             }
         } else {
             err = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
             if (!err) {
                 advertising_active = true;
-                update_led_strip(0, 255, 0);
+                update_led_state(BLE_STATE_ADVERTISING);
             }
         }
     }
@@ -174,6 +183,33 @@ void update_led_strip(uint8_t r, uint8_t g, uint8_t b)
     // Update the LED strip
     led_strip_update_rgb(strip, pixels, STRIP_NUM_PIXELS);
 }
+
+void update_led_state(enum ble_state state)
+{
+    current_ble_state = state;
+
+    switch (state)
+    {
+    case BLE_STATE_ADVERTISING:
+         update_led_strip(255, 255, 0); // Yellow
+        break;
+
+    case BLE_STATE_CONNECTING:
+      update_led_strip(255, 165, 0); // Orange
+        break;
+
+    case BLE_STATE_CONNECTED:
+        // k_timer_stop(&led_blink_timer);
+        update_led_strip(0, 255, 0); // Solid green
+        break;
+
+    default:
+        // k_timer_stop(&led_blink_timer);
+        update_led_strip(255, 0, 0); // Solid red (idle/error)
+        break;
+    }
+}
+
 #define NUM_SAMPLES 5
 #define SMOOTHING_ALPHA 0.1f
 #define DEFAULT_DB_OFFSET 0.0f
@@ -273,15 +309,18 @@ void calibrate_baseline_dc(void)
     printf("Calibrated baseline DC: %d mV\n", baseline_dc);
 }
 
+
 int main(void)
 {
     int err;
     printk("Startup\n");
-    update_led_strip(0, 0, 255);
+    update_led_strip(0, 255, 255);
     /* initialize the work item (do this before gpio_add_callback) */
     k_work_init(&button_work, button_work_handler);
     // Initialize the button timer
     k_timer_init(&button_timer, button_timer_expiry, NULL);
+
+    update_led_state(BLE_STATE_IDLE);
 
     if (!device_is_ready(pwr_En.port))
     {
@@ -357,16 +396,16 @@ int main(void)
         // {
         //     update_led_strip(0, 0, 255);
         // }
-        if (count == 4)
-        {
-            update_led_strip(255, 255, 255);
-                gpio_pin_set_dt(&pwr_En, 0);                        // Set HIGH again
+        // if (count == 4)
+        // {
+        //     update_led_strip(255, 255, 255);
+        //         gpio_pin_set_dt(&pwr_En, 0);                        // Set HIGH again
 
-        }
-        if (count == 5)
-        {
-            count = 0;
-        }
+        // }
+        // if (count == 5)
+        // {
+        //     count = 0;
+        // }
 
         // Fixed-size frame sampling with DC blocking HPF and RMS
         int32_t sum_sq = 0;

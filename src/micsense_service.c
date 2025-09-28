@@ -234,6 +234,8 @@ static void connected(struct bt_conn *conn, uint8_t err)
         printf("Connection established! Connected to: %s Role: %u Connection interval: %u Slave latency: %u Connection supervisory timeout: %u\n",
                addr, info.role, info.le.interval, info.le.latency, info.le.timeout);
                setup_alert_service();
+
+                update_led_state(BLE_STATE_CONNECTED);
     }
 }
 
@@ -241,6 +243,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
     printf("Disconnected (reason %u)\n", reason);
     my_connection = NULL;
+     update_led_state(BLE_STATE_ADVERTISING);
 }
 
 static struct bt_conn_cb conn_callbacks = {

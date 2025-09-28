@@ -67,6 +67,12 @@ int MICSENSE_service_init(void);
 
 /* Initialize BLE stack */
 int init_ble(void);
+enum ble_state {
+    BLE_STATE_IDLE,
+    BLE_STATE_ADVERTISING,
+    BLE_STATE_CONNECTING,
+    BLE_STATE_CONNECTED
+};
 
 /* BLE Connection Callbacks */
 void on_cccd_changed(const struct bt_gatt_attr *attr, uint16_t value);
