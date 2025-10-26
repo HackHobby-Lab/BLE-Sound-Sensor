@@ -458,10 +458,10 @@ int main(void)
             above_ms += FRAME_MS;
             below_ms = 0;
 
-            if (notify_armed &&
-                above_ms >= TRIGGER_HOLD_MS &&
-                (now_ms - last_notify_ms) >= NOTIFY_COOLDOWN_MS)
-            {
+            // if (notify_armed &&
+            //     above_ms >= TRIGGER_HOLD_MS &&
+            //     (now_ms - last_notify_ms) >= NOTIFY_COOLDOWN_MS)
+            // {
 
                 alertThreshold = 1;
                 printk("------>>>>>>>>>Value of threshold variable: %d\n", threshold_value);
@@ -480,9 +480,9 @@ int main(void)
                                alertThreshold, db_filtered);
                     }
                 }
-                last_notify_ms = now_ms;
-                notify_armed = 0; // disarm until rearmed below
-            }
+            //     last_notify_ms = now_ms;
+            //     notify_armed = 0; // disarm until rearmed below
+            // }
         }
         else
         {
@@ -499,7 +499,7 @@ int main(void)
         // dB Streaming Notification
         if (sound_streaming_enabled > 0 && my_connection)
         {
-            db_int = (int16_t)(db_filtered);
+            db_int = (int8_t)(db_filtered);
             int err = bt_gatt_notify(my_connection, getStreamService_attr, &db_int, sizeof(db_int));
             if (err)
             {

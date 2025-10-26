@@ -31,7 +31,7 @@
 #define BT_UUID_THRESHOLD_ALERT_CHARACTERISTIC   BT_UUID_DECLARE_128(BT_UUID_THRESHOLD_ALERT_CHARACTERISTIC_VAL)
 
 #define BT_UUID_MICSENESE BT_UUID_DECLARE_128(BT_UUID_MICSENESE_VAL)
-#define MAX_TRANSMIT_SIZE 240
+#define MAX_TRANSMIT_SIZE 1024
 volatile bool ble_ready = false;
 
 struct bt_conn *my_connection = NULL;
@@ -219,25 +219,29 @@ static void connected(struct bt_conn *conn, uint8_t err)
     char addr[BT_ADDR_LE_STR_LEN];
     my_connection = conn;
 
-    if (err)
-    {
+    if (err) {
         printf("Connection failed (err %u)\n", err);
         return;
-    }
-    else if (bt_conn_get_info(conn, &info))
-    {
+    } else if (bt_conn_get_info(conn, &info)) {
         printf("Could not parse info\n");
-    }
-    else
-    {
+    } else {
         bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
         printf("Connection established! Connected to: %s Role: %u Connection interval: %u Slave latency: %u Connection supervisory timeout: %u\n",
                addr, info.role, info.le.interval, info.le.latency, info.le.timeout);
-               setup_alert_service();
 
-                update_led_state(BLE_STATE_CONNECTED);
+        setup_alert_service();
+        update_led_state(BLE_STATE_CONNECTED);
+
+        /* 🔑 Request safe connection parameters */
+        const struct bt_le_conn_param *param = BT_LE_CONN_PARAM(24, 40, 0, 400);
+
+        int rc = bt_conn_le_param_update(conn, &param);
+        if (rc) {
+            printf("conn param update failed (%d)\n", rc);
+        }
     }
 }
+
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {

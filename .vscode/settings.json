@@ -5,6 +5,7 @@
         "conn.h": "c",
         "soc.h": "c",
         "gatt.h": "c",
-        "micsense_service.h": "c"
+        "micsense_service.h": "c",
+        "devicetree.h": "c"
     }
 }
