@@ -227,7 +227,8 @@ static int32_t baseline_dc = 1500; // This will be updated after calibration
 // --- Band-pass filter (biquad) to emphasize baby cries ---
 #define BPF_FC_HZ 800.0f      // Center frequency
 #define BPF_Q 0.707f          // Quality factor
-#define DB_BPF_GAIN_COMP 6.0f // dB compensation after band-pass
+// #define DB_BPF_GAIN_COMP 6.0f // dB compensation after band-pass
+#define DB_BPF_GAIN_COMP 25.0f // dB compensation after band-pass
 
 typedef struct
 {
@@ -449,6 +450,10 @@ int main(void)
 
         float db = 20.0f * log10f(rms) + calibration_offset + DB_BPF_GAIN_COMP;
         db_filtered = SMOOTHING_ALPHA * db + (1.0f - SMOOTHING_ALPHA) * db_filtered;
+
+        db_int = (int8_t)(db_filtered);
+        printk("Threshold notification sent:(dB=%d)\n", db_int);
+        // k_msleep(SLEEP_TIME_MS);
 
         // dB Alert Notification with hold and cooldown (one per excursion)
         uint32_t now_ms = k_uptime_get_32();
