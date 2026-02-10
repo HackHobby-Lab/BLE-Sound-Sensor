@@ -16,6 +16,20 @@
 #include <soc.h>
 #include <math.h>
 #include <stdio.h>
+#include <nrfx_pdm.h>
+
+#define BUFFER_SIZE     128
+#define UPDATE_MS       150
+
+/* MP34DT01-M specs */
+#define PDM_NOISE_FLOOR_DB  30.0f
+#define PDM_MAX_SPL_DB      120.0f
+
+static int16_t buffer[2][BUFFER_SIZE];
+static uint8_t buf_index = 0;
+
+static volatile bool data_ready = false;
+static int16_t *ready_buffer = NULL;
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
@@ -120,14 +134,14 @@ static void button_work_handler(struct k_work *work)
 {
     if (k_timer_status_get(&button_timer) > 0) {
         // Timer expired before release → long press
-        printk("Long press detected!\n");
+        printf("Long press detected!\n");
         gpio_pin_set_dt(&pwr_En, 0);
         while (1) {
             k_sleep(K_FOREVER);
         }
     } else {
         // Released before timer expired → short press
-        printk("Short press detected. Toggling BLE advertising...\n");
+        printf("Short press detected. Toggling BLE advertising...\n");
         int err;
         if (advertising_active) {
             err = bt_le_adv_stop();
@@ -310,11 +324,76 @@ void calibrate_baseline_dc(void)
     printf("Calibrated baseline DC: %d mV\n", baseline_dc);
 }
 
+/* ===================== PDM IRQ ===================== */
+
+static void pdm_handler(nrfx_pdm_evt_t const * p_evt)
+{
+    if (p_evt->buffer_requested) {
+        nrfx_pdm_buffer_set(buffer[(buf_index + 1) % 2], BUFFER_SIZE);
+    }
+
+    if (p_evt->buffer_released != NULL) {
+        ready_buffer = p_evt->buffer_released;
+        buf_index = (buf_index + 1) % 2;
+        data_ready = true;
+    }
+}
+
+/* ===================== AUDIO LOGIC ===================== */
+
+float calculate_rms(int16_t *samples, int num_samples)
+{
+    double sum_squares = 0.0;
+
+    for (int i = 0; i < num_samples; i++) {
+        int32_t s = samples[i];
+        sum_squares += (double)s * (double)s;
+    }
+
+    return sqrtf(sum_squares / num_samples);
+}
+
+float rms_to_db_spl(float rms)
+{
+    if (rms < 50.0f) {
+        return PDM_NOISE_FLOOR_DB;
+    }
+
+    const float rms_at_50db = 500.0f;
+    const float expansion_factor = 2.5f;
+
+    float db_from_baseline = 20.0f * log10f(rms / rms_at_50db);
+    float db_spl = 50.0f + (db_from_baseline * expansion_factor);
+
+    if (db_spl < PDM_NOISE_FLOOR_DB)
+        db_spl = PDM_NOISE_FLOOR_DB;
+
+    if (db_spl > PDM_MAX_SPL_DB)
+        db_spl = PDM_MAX_SPL_DB;
+
+    return db_spl;
+}
+
+/* Manually connect PDM IRQ (required when using nrfx directly) */
+static void pdm_irq_config(void)
+{
+    IRQ_CONNECT(DT_IRQN(DT_NODELABEL(pdm0)),
+                DT_IRQ(DT_NODELABEL(pdm0), priority),
+                nrfx_pdm_irq_handler,
+                NULL,
+                0);
+
+    irq_enable(DT_IRQN(DT_NODELABEL(pdm0)));
+}
 
 int main(void)
 {
     int err;
-    printk("Startup\n");
+    printf("Startup\n");
+
+    /* Connect IRQ first */
+    pdm_irq_config();
+
     update_led_strip(0, 255, 255);
     /* initialize the work item (do this before gpio_add_callback) */
     k_work_init(&button_work, button_work_handler);
@@ -325,7 +404,7 @@ int main(void)
 
     if (!device_is_ready(pwr_En.port))
     {
-        printk("GPIO port not ready\n");
+        printf("GPIO port not ready\n");
         return;
     }
     gpio_pin_configure_dt(&pwr_En, GPIO_OUTPUT_ACTIVE); // Start HIGH (ACTIVE)
@@ -354,6 +433,15 @@ int main(void)
     }
     // Start with advertising disabled - user must press button to enable
     advertising_active = false;
+
+    printf("Activating BLE advertising...\n");
+
+    err = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), NULL, 0);
+    if (!err) {
+        advertising_active = true;
+        update_led_state(BLE_STATE_ADVERTISING);
+    }
+
     update_led_strip(255, 0, 0); // Red LED to indicate not advertising
 
     if (!device_is_ready(adc_dev))
@@ -383,8 +471,70 @@ int main(void)
     // Init band-pass
     biquad_init_bandpass(&bpf, (float)SAMPLE_RATE_HZ, BPF_FC_HZ, BPF_Q);
 
+    nrfx_pdm_config_t config =
+    NRFX_PDM_DEFAULT_CONFIG(27, 25);
+
+    config.mode = NRF_PDM_MODE_MONO;
+    config.edge = NRF_PDM_EDGE_LEFTFALLING;
+    config.clock_freq = NRF_PDM_FREQ_1280K;
+    config.ratio = NRF_PDM_RATIO_80X;
+
+    if (nrfx_pdm_init(&config, pdm_handler) != NRFX_SUCCESS) {
+        printf("PDM init failed\n");
+        return;
+    }
+
+    nrfx_pdm_buffer_set(buffer[0], BUFFER_SIZE);
+
+    if (nrfx_pdm_start() != NRFX_SUCCESS) {
+        printf("PDM start failed\n");
+        return;
+    }
+
+    printf("Listening...\n");
+
+    float db_max = PDM_NOISE_FLOOR_DB;
+    float db_max_ever = PDM_NOISE_FLOOR_DB;
+    uint32_t peak_counter = 0;
+
+    int64_t last_print = k_uptime_get();
+
     while (1)
     {
+        if (data_ready) {
+            data_ready = false;
+
+            float rms = calculate_rms(ready_buffer, BUFFER_SIZE);
+            float db = rms_to_db_spl(rms);
+
+            /* Peak tracking */
+            if (db > db_max) {
+                db_max = db;
+                peak_counter = 0;
+            } else {
+                peak_counter++;
+                if (peak_counter > 150) {
+                    db_max = db;
+                }
+            }
+
+            if (db > db_max_ever) {
+                db_max_ever = db;
+            }
+
+            /* Print every UPDATE_MS */
+            int64_t now = k_uptime_get();
+            if ((now - last_print) >= UPDATE_MS) {
+
+                printf("%.1f dB | Peak: %.1f | MAX EVER: %.1f | RMS: %.0f\n",
+                       db, db_max, db_max_ever, rms);
+
+                last_print = now;
+            }
+
+            db_filtered = db;
+        }
+
         // if (count == 1)
         // {
         //     update_led_strip(255, 0, 0);
@@ -408,52 +558,52 @@ int main(void)
         //     count = 0;
         // }
 
-        // Fixed-size frame sampling with DC blocking HPF and RMS
-        int32_t sum_sq = 0;
-        for (int i = 0; i < FRAME_SAMPLES; i++)
-        {
-            err = adc_read(adc_dev, &sequence);
-            if (err != 0)
-            {
-                printf("ADC reading failed with error %d.\n", err);
-                continue;
-            }
+        // // Fixed-size frame sampling with DC blocking HPF and RMS
+        // int32_t sum_sq = 0;
+        // for (int i = 0; i < FRAME_SAMPLES; i++)
+        // {
+        //     err = adc_read(adc_dev, &sequence);
+        //     if (err != 0)
+        //     {
+        //         printf("ADC reading failed with error %d.\n", err);
+        //         continue;
+        //     }
 
-            int32_t mv_value = sampleBuffer[0];
-            int32_t adc_vref = adc_ref_internal(adc_dev);
-            adc_raw_to_millivolts(adc_vref, ADC_GAIN, ADC_RESOLUTION, &mv_value);
+        //     int32_t mv_value = sampleBuffer[0];
+        //     int32_t adc_vref = adc_ref_internal(adc_dev);
+        //     adc_raw_to_millivolts(adc_vref, ADC_GAIN, ADC_RESOLUTION, &mv_value);
 
-            // Convert to centered float in mV
-            float x = (float)(mv_value - baseline_dc);
-            // One-pole DC blocker (high-pass)
-            float y = x - hpf_prev_x + HPF_R * hpf_prev_y;
-            hpf_prev_x = x;
-            hpf_prev_y = y;
+        //     // Convert to centered float in mV
+        //     float x = (float)(mv_value - baseline_dc);
+        //     // One-pole DC blocker (high-pass)
+        //     float y = x - hpf_prev_x + HPF_R * hpf_prev_y;
+        //     hpf_prev_x = x;
+        //     hpf_prev_y = y;
 
-            // Band-pass filter
-            float y_bp = biquad_process(&bpf, y);
+        //     // Band-pass filter
+        //     float y_bp = biquad_process(&bpf, y);
 
-            // RMS accumulate (limit to safe range)
-            if (y_bp > 3000.0f)
-                y_bp = 3000.0f;
-            if (y_bp < -3000.0f)
-                y_bp = -3000.0f;
-            sum_sq += (int32_t)(y_bp * y_bp);
+        //     // RMS accumulate (limit to safe range)
+        //     if (y_bp > 3000.0f)
+        //         y_bp = 3000.0f;
+        //     if (y_bp < -3000.0f)
+        //         y_bp = -3000.0f;
+        //     sum_sq += (int32_t)(y_bp * y_bp);
 
-            // Sleep to approximate SAMPLE_RATE_HZ
-            k_busy_wait(1000000 / SAMPLE_RATE_HZ);
-        }
+        //     // Sleep to approximate SAMPLE_RATE_HZ
+        //     k_busy_wait(1000000 / SAMPLE_RATE_HZ);
+        // }
 
-        float rms = sqrtf((float)sum_sq / FRAME_SAMPLES);
-        if (rms < 1.0f)
-            rms = 1.0f;
+        // float rms = sqrtf((float)sum_sq / FRAME_SAMPLES);
+        // if (rms < 1.0f)
+        //     rms = 1.0f;
 
-        float db = 20.0f * log10f(rms) + calibration_offset + DB_BPF_GAIN_COMP;
-        db_filtered = SMOOTHING_ALPHA * db + (1.0f - SMOOTHING_ALPHA) * db_filtered;
+        // float db = 20.0f * log10f(rms) + calibration_offset + DB_BPF_GAIN_COMP;
+        // db_filtered = SMOOTHING_ALPHA * db + (1.0f - SMOOTHING_ALPHA) * db_filtered;
 
         db_int = (int8_t)(db_filtered);
-        printk("Threshold notification sent:(dB=%d)\n", db_int);
-        // k_msleep(SLEEP_TIME_MS);
+        // printf("Threshold notification sent:(dB=%d)\n", db_int);
+        k_msleep(SLEEP_TIME_MS);
 
         // dB Alert Notification with hold and cooldown (one per excursion)
         uint32_t now_ms = k_uptime_get_32();
@@ -469,7 +619,7 @@ int main(void)
             // {
 
                 alertThreshold = 1;
-                printk("------>>>>>>>>>Value of threshold variable: %d\n", threshold_value);
+                printf("------>>>>>>>>>Value of threshold variable: %d\n", threshold_value);
 
                 if (my_connection)
                 {
@@ -477,11 +627,11 @@ int main(void)
                                              &alertThreshold, sizeof(alertThreshold));
                     if (err)
                     {
-                        printk("Failed to notify (err %d)\n", err);
+                        printf("Failed to notify (err %d)\n", err);
                     }
                     else
                     {
-                        printk("Threshold notification sent: %d (dB=%.1f)\n",
+                        printf("Threshold notification sent: %d (dB=%.1f)\n",
                                alertThreshold, db_filtered);
                     }
                 }
@@ -508,11 +658,11 @@ int main(void)
             int err = bt_gatt_notify(my_connection, getStreamService_attr, &db_int, sizeof(db_int));
             if (err)
             {
-                printk("Failed to notify (err %d)\n", err);
+                printf("Failed to notify (err %d)\n", err);
             }
             else
             {
-                printk("dB Notification sent: %d\n", db_int);
+                printf("dB Notification sent: %d\n", db_int);
             }
         }
 
