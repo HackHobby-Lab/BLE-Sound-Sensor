@@ -230,6 +230,12 @@ static int32_t baseline_dc = 1500; // This will be updated after calibration
 // #define DB_BPF_GAIN_COMP 6.0f // dB compensation after band-pass
 #define DB_BPF_GAIN_COMP 25.0f // dB compensation after band-pass
 
+// --- Sound Level Thresholds ---
+#define QUIET_THRESHOLD_MAX 40.0f         // dB - Quiet sounds (less than 40dB)
+#define MEDIUM_THRESHOLD_MIN 40.0f        // dB - Moderate/Medium sounds start
+#define MEDIUM_THRESHOLD_MAX 70.0f        // dB - Moderate/Medium sounds end
+#define LOUD_THRESHOLD_MIN 70.0f          // dB - Loud/Dangerous sounds start (above 70dB)
+
 typedef struct
 {
     float a0;
@@ -287,6 +293,22 @@ static uint32_t above_ms = 0;
 static uint32_t below_ms = 0;
 static uint32_t last_notify_ms = 0;
 static int notify_armed = 1;
+
+static const char* get_sound_level_string(float db_value)
+{
+    if (db_value < QUIET_THRESHOLD_MAX)
+    {
+        return "Quiet";
+    }
+    else if (db_value < MEDIUM_THRESHOLD_MAX)
+    {
+        return "Medium";
+    }
+    else
+    {
+        return "Loud";
+    }
+}
 
 void calibrate_baseline_dc(void)
 {
@@ -452,8 +474,11 @@ int main(void)
         db_filtered = SMOOTHING_ALPHA * db + (1.0f - SMOOTHING_ALPHA) * db_filtered;
 
         db_int = (int8_t)(db_filtered);
-        printk("Threshold notification sent:(dB=%d)\n", db_int);
-        // k_msleep(SLEEP_TIME_MS);
+        // printk("Threshold notification sent:(dB=%d)\n", db_int);
+        
+        // Display current sound level status (Quiet/Medium/Loud)
+        printk("Sound Level: %s (dB=%d)\n", get_sound_level_string(db_filtered), db_int);
+        k_msleep(25);
 
         // dB Alert Notification with hold and cooldown (one per excursion)
         uint32_t now_ms = k_uptime_get_32();
@@ -469,7 +494,7 @@ int main(void)
             // {
 
                 alertThreshold = 1;
-                printk("------>>>>>>>>>Value of threshold variable: %d\n", threshold_value);
+                // printk("------>>>>>>>>>Value of threshold variable: %d\n", threshold_value);
 
                 if (my_connection)
                 {
@@ -481,8 +506,8 @@ int main(void)
                     }
                     else
                     {
-                        printk("Threshold notification sent: %d (dB=%.1f)\n",
-                               alertThreshold, db_filtered);
+                        // printk("Threshold notification sent: %d (dB=%.1f)\n",
+                        //        alertThreshold, db_filtered);
                     }
                 }
             //     last_notify_ms = now_ms;
