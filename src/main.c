@@ -215,7 +215,7 @@ void update_led_state(enum ble_state state)
 #define DEFAULT_DB_OFFSET 0.0f
 
 static float db_filtered = 0.0f;
-static float calibration_offset = DEFAULT_DB_OFFSET;
+static float calibration_offset = -6.0f; // Reduced from 0.0f to -6.0f to account for AGC
 static int32_t baseline_dc = 1500; // This will be updated after calibration
 
 // --- Sampling and filtering configuration ---
@@ -332,6 +332,93 @@ void calibrate_baseline_dc(void)
     printf("Calibrated baseline DC: %d mV\n", baseline_dc);
 }
 
+static bool calibration_mode = false; // Set to false after calibration
+
+static void log_calibration_data(float rms, float db_raw)
+{
+    // Log raw values for comparison with UT353
+    // Format: RMS | Raw dB | Filtered dB | Baseline DC
+    printf("CALIB | RMS=%.2f | dB_raw=%.2f | dB_filtered=%.2f | baseline=%d mV\n",
+           rms, db_raw, db_filtered, baseline_dc);
+}
+
+// --- Calibration data storage ---
+#define CAL_POINTS 5
+static struct {
+    float reference_db;  // UT353 reading
+    float sensor_db;     // Your sensor reading
+} cal_data[CAL_POINTS] = {0};
+static int cal_index = 0;
+
+static void store_calibration_point(float ref_db, float sensor_db)
+{
+    if (cal_index < CAL_POINTS) {
+        cal_data[cal_index].reference_db = ref_db;
+        cal_data[cal_index].sensor_db = sensor_db;
+        printf("CAL POINT %d: Reference=%.1f dB, Sensor=%.1f dB\n", 
+               cal_index + 1, ref_db, sensor_db);
+        cal_index++;
+    }
+}
+
+static void compute_calibration_curve(void)
+{
+    if (cal_index < 2) {
+        printf("Need at least 2 calibration points\n");
+        return;
+    }
+    
+    // Simple linear fit: sensor_db = m * reference_db + b
+    float sum_xy = 0, sum_x = 0, sum_y = 0, sum_x2 = 0;
+    
+    for (int i = 0; i < cal_index; i++) {
+        float x = cal_data[i].reference_db;
+        float y = cal_data[i].sensor_db;
+        sum_x += x;
+        sum_y += y;
+        sum_xy += x * y;
+        sum_x2 += x * x;
+    }
+    
+    float n = (float)cal_index;
+    float m = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x);
+    float b = (sum_y - m * sum_x) / n;
+    
+    printf("Calibration curve: sensor = %.3f * reference + %.3f\n", m, b);
+    printf("Inverse: reference = (sensor - %.3f) / %.3f\n", b, m);
+}
+
+static void handle_calibration_command(const char *input)
+{
+    if (strncmp(input, "CAL ", 4) == 0) {
+        float ref_db, sensor_db;
+        int parsed = sscanf(input + 4, "%f %f", &ref_db, &sensor_db);
+        
+        if (parsed == 2) {
+            store_calibration_point(ref_db, sensor_db);
+        } else {
+            printf("Invalid format. Use: CAL <reference_db> <sensor_db>\n");
+            printf("Example: CAL 50.5 55.2\n");
+        }
+    }
+    else if (strcmp(input, "COMPUTE") == 0) {
+        compute_calibration_curve();
+    }
+    else if (strcmp(input, "SHOW") == 0) {
+        printf("\nStored calibration points:\n");
+        for (int i = 0; i < cal_index; i++) {
+            printf("  Point %d: Reference=%.1f dB, Sensor=%.1f dB, Diff=%.1f dB\n",
+                   i + 1, 
+                   cal_data[i].reference_db,
+                   cal_data[i].sensor_db,
+                   cal_data[i].sensor_db - cal_data[i].reference_db);
+        }
+    }
+    else if (strcmp(input, "RESET") == 0) {
+        cal_index = 0;
+        printf("Calibration data reset\n");
+    }
+}
 
 int main(void)
 {
@@ -399,11 +486,21 @@ int main(void)
         return;
     }
 
-    //     printf("Calibrating microphone DC offset...\n");
-    // calibrate_baseline_dc();
-
     // Init band-pass
     biquad_init_bandpass(&bpf, (float)SAMPLE_RATE_HZ, BPF_FC_HZ, BPF_Q);
+
+    printf("Calibrating microphone DC offset...\n");
+    calibrate_baseline_dc();
+
+    printf("\n=== CALIBRATION MODE ===\n");
+    printf("Instructions:\n");
+    printf("1. Make a sound at a known level\n");
+    printf("2. Read the dB value from UT353 meter\n");
+    printf("3. Send command: CAL <reference_db> <sensor_db>\n");
+    printf("   Example: CAL 50.5 55.2\n");
+    printf("4. Repeat 5 times at different sound levels (quiet to loud)\n");
+    printf("5. Send: COMPUTE to calculate calibration curve\n");
+    printf("======================\n\n");
 
     while (1)
     {
@@ -475,9 +572,15 @@ int main(void)
 
         db_int = (int8_t)(db_filtered);
         // printk("Threshold notification sent:(dB=%d)\n", db_int);
+        // if (calibration_mode) {
+        //     log_calibration_data(rms, db);
+        // }
+
+        // Always show current sensor reading
+        printf(">>> CURRENT SENSOR: %.2f dB (dB_raw=%.2f)\n", db_filtered, db);
         
         // Display current sound level status (Quiet/Medium/Loud)
-        printk("Sound Level: %s (dB=%d)\n", get_sound_level_string(db_filtered), db_int);
+        // printk("Sound Level: %s (dB=%d)\n", get_sound_level_string(db_filtered), db_int);
         k_msleep(25);
 
         // dB Alert Notification with hold and cooldown (one per excursion)
