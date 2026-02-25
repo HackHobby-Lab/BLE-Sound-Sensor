@@ -38,7 +38,6 @@ struct led_rgb pixels[STRIP_NUM_PIXELS];
 const struct device *strip = DEVICE_DT_GET(STRIP_NODE);
 
 #define EN_PIN_NODE DT_NODELABEL(user_output_pin)
-
 static const struct gpio_dt_spec pwr_En = GPIO_DT_SPEC_GET(EN_PIN_NODE, gpios);
 
 #define PAIR_PIN DT_NODELABEL(user_input_pin)
@@ -91,43 +90,178 @@ struct adc_channel_cfg battery_ch_cfg = {
 };
 
 int16_t sampleBuffer[1];
-
 struct adc_sequence sequence = {
-    .channels = BIT(ADC_CHANNEL),
-    .buffer = sampleBuffer,
+    .channels    = BIT(ADC_CHANNEL),
+    .buffer      = sampleBuffer,
     .buffer_size = sizeof(sampleBuffer),
-    .resolution = ADC_RESOLUTION};
+    .resolution  = ADC_RESOLUTION
+};
 
 // ADC Battery Sequence
 int16_t battery_sample[1];
-
 struct adc_sequence battery_sequence = {
-    .channels = BIT(BATTERY_ADC_CHANNEL),
-    .buffer = battery_sample,
+    .channels    = BIT(BATTERY_ADC_CHANNEL),
+    .buffer      = battery_sample,
     .buffer_size = sizeof(battery_sample),
-    .resolution = ADC_RESOLUTION};
+    .resolution  = ADC_RESOLUTION
+};
 
-static const struct bt_data ad[] =
-    {
-        BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-        BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_SET_THRESHOLD_SERVICE_VAL),
+static const struct bt_data ad[] = {
+    BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
+    BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_SET_THRESHOLD_SERVICE_VAL),
 };
 
 static struct k_timer button_timer;
 static bool long_press_detected = false;
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADC / SAMPLING CONFIGURATION
+// ─────────────────────────────────────────────────────────────────────────────
+#define NUM_SAMPLES      5
+#define SAMPLE_RATE_HZ   8000
+#define FRAME_SAMPLES    64
+#define HPF_R            0.995f   // ~16 Hz high-pass cutoff @ 8 kHz
+#define FRAME_MS         ((1000 * FRAME_SAMPLES) / SAMPLE_RATE_HZ)  // 8 ms
+
+// Band-pass filter centred on baby-cry fundamental (~800 Hz)
+#define BPF_FC_HZ        800.0f
+#define BPF_Q            0.707f
+
+// ─────────────────────────────────────────────────────────────────────────────
+// dB CALIBRATION  (AGC **disabled**)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// MEASUREMENT REFERENCE:
+//   UT353 reading  : 46 – 48 dBA  (≈ 47 dB average)
+//   Board reading  : 38 – 41 dB   (≈ 39 – 40 dB, filtered int)
+//   Raw dB offset  : UT353 − board ≈ +7 dB
+//
+// HOW THE dB IS COMPUTED:
+//   db = 20 * log10(rms_mV) + DB_TOTAL_OFFSET
+//
+//   DB_TOTAL_OFFSET replaces the old separate calibration_offset + DB_BPF_GAIN_COMP
+//   pair that was tuned for AGC-on.  With AGC disabled the signal chain is
+//   linear so a single scalar offset is the cleanest approach.
+//
+// DERIVATION:
+//   Old offset  = calibration_offset(0) + DB_BPF_GAIN_COMP(25) = 25 dB
+//   Measured gap = +7 dB (board reads 7 dB too low vs. UT353)
+//   New offset  = 25 + 7 = 32 dB
+//
+// If after flashing you still see a consistent offset, adjust DB_TOTAL_OFFSET
+// by the difference:
+//   board too LOW  by N dB  →  increase DB_TOTAL_OFFSET by N
+//   board too HIGH by N dB  →  decrease DB_TOTAL_OFFSET by N
+//
+#define DB_TOTAL_OFFSET  32.0f
+
+// EMA smoothing (α = 0.1 → ~10-frame time constant ≈ 80 ms)
+#define SMOOTHING_ALPHA  0.1f
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SOUND LEVEL THRESHOLDS  (kept in real-world dB SPL now that we're calibrated)
+// ─────────────────────────────────────────────────────────────────────────────
+#define QUIET_THRESHOLD_MAX   50.0f   // < 50 dB  → Quiet
+#define MEDIUM_THRESHOLD_MAX  70.0f   // 50–70 dB → Medium
+// > 70 dB → Loud
+
+static float db_filtered = 0.0f;
+static int32_t baseline_dc = 1500;
+
+typedef struct {
+    float a0, a1, a2, b1, b2, z1, z2;
+} biquad_t;
+
+static biquad_t bpf;
+
+
+static float hpf_prev_x = 0.0f;
+static float hpf_prev_y = 0.0f;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// dB ALERT GATING
+// ─────────────────────────────────────────────────────────────────────────────
+#define TRIGGER_HOLD_MS    200
+#define RESET_HOLD_MS      100
+#define NOTIFY_COOLDOWN_MS 400
+
+static uint32_t above_ms   = 0;
+static uint32_t below_ms   = 0;
+static uint32_t last_notify_ms = 0;
+static int notify_armed    = 1;
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BABY CRY DETECTION  (raw dB burst-counting state machine)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Now that the dB values are calibrated to real SPL, these thresholds are
+// expressed in actual dB SPL.
+//
+// Typical baby cry: 60 – 80 dB SPL at 1 m.
+// Quiet room (baby sleeping): 40 – 50 dB SPL.
+//
+// Entry threshold is set conservatively low (55 dB) to catch the rising edge
+// of a cry before it reaches full volume, while the lift guard (+6 dB above
+// the rolling baseline) prevents false triggers from slow ambient rises.
+//
+#define CRY_RAW_ENTER_DB          55.0f   // SPL: cry onset (dataset: spikes to 60–71)
+#define CRY_RAW_EXIT_DB           52.0f   // SPL: inter-burst dip / back to baseline
+#define CRY_BURST_MIN_MS          300     // Reject spikes < 300 ms (cough, door)
+#define CRY_BURST_MAX_MS          12000   // Reject continuous sounds > 12 s (TV, fan)
+#define CRY_BURST_COUNT_REQUIRED  2       // Minimum bursts in window to confirm cry
+#define CRY_EPISODE_WINDOW_MS     15000   // Rolling window for burst counting (15 s)
+#define CRY_RISE_GUARD_DB         6.0f    // Must lift ≥ 6 dB above rolling baseline
+#define CRY_ALERT_COOLDOWN_MS     5000    // 5 s between BLE notifications
+#define BASELINE_EMA_ALPHA        0.05f   // Slow baseline tracker (quiet periods only)
+#define BURST_HISTORY_SIZE        8
+
+typedef enum {
+    CRY_STATE_IDLE = 0,
+    CRY_STATE_BURST_ACTIVE,
+    CRY_STATE_CONFIRMED,
+} cry_sm_state_t;
+
+typedef struct {
+    cry_sm_state_t  state;
+    uint32_t        burst_start_ms;
+    float           burst_peak_raw_db;
+    uint32_t        burst_end_times_ms[BURST_HISTORY_SIZE];
+    uint8_t         burst_head;
+    uint8_t         burst_count_total;
+    float           baseline_raw_db;
+    uint32_t        last_alert_ms;
+    bool            cry_detected;
+    bool            episode_active;
+    uint8_t         confirmed_burst_count;
+} baby_cry_sm_t;
+
+static baby_cry_sm_t cry_sm = {
+    .state              = CRY_STATE_IDLE,
+    .baseline_raw_db    = 47.0f,   // initialise near expected quiet-room SPL
+    .last_alert_ms      = 0,
+    .cry_detected       = false,
+    .episode_active     = false,
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DC BASELINE CALIBRATION
+// ─────────────────────────────────────────────────────────────────────────────
+#define NUM_CAL_SAMPLES 5
+
 static void button_work_handler(struct k_work *work)
 {
     if (k_timer_status_get(&button_timer) > 0) {
         // Timer expired before release → long press
-        printk("Long press detected!\n");
+        printf("Long press detected!\n");
         gpio_pin_set_dt(&pwr_En, 0);
         while (1) {
             k_sleep(K_FOREVER);
         }
     } else {
         // Released before timer expired → short press
-        printk("Short press detected. Toggling BLE advertising...\n");
+        printf("Short press detected. Toggling BLE advertising...\n");
         int err;
         if (advertising_active) {
             err = bt_le_adv_stop();
@@ -147,15 +281,11 @@ static void button_work_handler(struct k_work *work)
     k_timer_stop(&button_timer); // cleanup
 }
 
-
-
 void button_timer_expiry(struct k_timer *timer_id)
 {
     long_press_detected = true;
     k_work_submit(&button_work); // Submit the work handler for long press
 }
-
-
 
 void input_pin_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
@@ -210,481 +340,287 @@ void update_led_state(enum ble_state state)
     }
 }
 
-#define NUM_SAMPLES 5
-#define SMOOTHING_ALPHA 0.1f
-#define DEFAULT_DB_OFFSET 0.0f
-
-static float db_filtered = 0.0f;
-static float calibration_offset = -6.0f; // Reduced from 0.0f to -6.0f to account for AGC
-static int32_t baseline_dc = 1500; // This will be updated after calibration
-
-// --- Sampling and filtering configuration ---
-#define SAMPLE_RATE_HZ 8000
-#define FRAME_SAMPLES 64
-#define HPF_R 0.995f // ~16 Hz cutoff at 8 kHz
-#define FRAME_MS ((1000 * FRAME_SAMPLES) / SAMPLE_RATE_HZ)
-
-// --- Band-pass filter (biquad) to emphasize baby cries ---
-#define BPF_FC_HZ 800.0f      // Center frequency
-#define BPF_Q 0.707f          // Quality factor
-// #define DB_BPF_GAIN_COMP 6.0f // dB compensation after band-pass
-#define DB_BPF_GAIN_COMP 25.0f // dB compensation after band-pass
-
-// --- Sound Level Thresholds ---
-#define QUIET_THRESHOLD_MAX 40.0f         // dB - Quiet sounds (less than 40dB)
-#define MEDIUM_THRESHOLD_MIN 40.0f        // dB - Moderate/Medium sounds start
-#define MEDIUM_THRESHOLD_MAX 70.0f        // dB - Moderate/Medium sounds end
-#define LOUD_THRESHOLD_MIN 70.0f          // dB - Loud/Dangerous sounds start (above 70dB)
-
-typedef struct
+static void biquad_init_bandpass(biquad_t *s, float fs, float f0, float q)
 {
-    float a0;
-    float a1;
-    float a2;
-    float b1;
-    float b2;
-    float z1;
-    float z2;
-} biquad_t;
-
-static biquad_t bpf;
-
-static void biquad_init_bandpass(biquad_t *s, float sample_rate_hz, float f0_hz, float q)
-{
-    float w0 = 2.0f * (float)M_PI * f0_hz / sample_rate_hz;
-    float sin_w0 = sinf(w0);
-    float cos_w0 = cosf(w0);
-    float alpha = sin_w0 / (2.0f * q);
-
-    float b0 = q * alpha; // RBJ band-pass (constant skirt gain)
-    float b1 = 0.0f;
-    float b2 = -q * alpha;
-    float a0 = 1.0f + alpha;
-    float a1 = -2.0f * cos_w0;
-    float a2 = 1.0f - alpha;
-
-    // Normalize
-    s->a0 = b0 / a0;
-    s->a1 = b1 / a0;
-    s->a2 = b2 / a0;
-    s->b1 = a1 / a0;
-    s->b2 = a2 / a0;
-    s->z1 = 0.0f;
-    s->z2 = 0.0f;
+    float w0     = 2.0f * (float)M_PI * f0 / fs;
+    float sin_w0 = sinf(w0), cos_w0 = cosf(w0);
+    float alpha  = sin_w0 / (2.0f * q);
+    float b0 = q * alpha, b1 = 0.0f, b2 = -q * alpha;
+    float a0 = 1.0f + alpha, a1 = -2.0f * cos_w0, a2 = 1.0f - alpha;
+    s->a0 = b0/a0; s->a1 = b1/a0; s->a2 = b2/a0;
+    s->b1 = a1/a0; s->b2 = a2/a0;
+    s->z1 = 0.0f;  s->z2 = 0.0f;
 }
 
 static inline float biquad_process(biquad_t *s, float x)
 {
     float y = s->a0 * x + s->z1;
-    s->z1 = s->a1 * x - s->b1 * y + s->z2;
-    s->z2 = s->a2 * x - s->b2 * y;
+    s->z1   = s->a1 * x - s->b1 * y + s->z2;
+    s->z2   = s->a2 * x - s->b2 * y;
     return y;
 }
 
-static float hpf_prev_x = 0.0f;
-static float hpf_prev_y = 0.0f;
-
-// --- Notification gating: hold and cooldown ---
-#define TRIGGER_HOLD_MS 200    // Must stay above threshold this long
-#define RESET_HOLD_MS 100      // Must stay below to re-arm
-#define NOTIFY_COOLDOWN_MS 400 // Minimum gap between notifications
-
-static uint32_t above_ms = 0;
-static uint32_t below_ms = 0;
-static uint32_t last_notify_ms = 0;
-static int notify_armed = 1;
-
-static const char* get_sound_level_string(float db_value)
+static const char *get_sound_level_string(float db_value)
 {
-    if (db_value < QUIET_THRESHOLD_MAX)
-    {
-        return "Quiet";
+    if (db_value < QUIET_THRESHOLD_MAX)  return "Quiet";
+    if (db_value < MEDIUM_THRESHOLD_MAX) return "Medium";
+    return "Loud";
+}
+
+static uint8_t count_recent_bursts(uint32_t now_ms)
+{
+    uint8_t n    = 0;
+    uint8_t size = (cry_sm.burst_count_total < BURST_HISTORY_SIZE)
+                   ? cry_sm.burst_count_total : BURST_HISTORY_SIZE;
+    for (uint8_t i = 0; i < size; i++) {
+        if ((now_ms - cry_sm.burst_end_times_ms[i]) <= CRY_EPISODE_WINDOW_MS) n++;
     }
-    else if (db_value < MEDIUM_THRESHOLD_MAX)
-    {
-        return "Medium";
+    return n;
+}
+
+static void record_burst(uint32_t end_ms)
+{
+    cry_sm.burst_end_times_ms[cry_sm.burst_head] = end_ms;
+    cry_sm.burst_head = (cry_sm.burst_head + 1) % BURST_HISTORY_SIZE;
+    cry_sm.burst_count_total++;
+}
+
+void update_cry_detector_raw(float raw_db, uint32_t now_ms)
+{
+    cry_sm.cry_detected = false;
+
+    // Update rolling baseline only during quiet frames
+    if (raw_db < CRY_RAW_EXIT_DB) {
+        cry_sm.baseline_raw_db = BASELINE_EMA_ALPHA * raw_db
+                                 + (1.0f - BASELINE_EMA_ALPHA) * cry_sm.baseline_raw_db;
     }
-    else
-    {
-        return "Loud";
+
+    float lift = raw_db - cry_sm.baseline_raw_db;
+
+    switch (cry_sm.state) {
+
+    case CRY_STATE_IDLE:
+        if (raw_db >= CRY_RAW_ENTER_DB && lift >= CRY_RISE_GUARD_DB) {
+            cry_sm.burst_start_ms    = now_ms;
+            cry_sm.burst_peak_raw_db = raw_db;
+            cry_sm.state             = CRY_STATE_BURST_ACTIVE;
+            printf("CRY: [BURST START] raw=%.1f dB, lift=%.1f dB\n", raw_db, lift);
+        }
+        break;
+
+    case CRY_STATE_BURST_ACTIVE:
+        if (raw_db > cry_sm.burst_peak_raw_db) cry_sm.burst_peak_raw_db = raw_db;
+        {
+            uint32_t dur = now_ms - cry_sm.burst_start_ms;
+
+            if (raw_db < CRY_RAW_EXIT_DB) {
+                if (dur < CRY_BURST_MIN_MS) {
+                    printf("CRY: [REJECT SHORT] %u ms, peak=%.1f dB\n",
+                           dur, cry_sm.burst_peak_raw_db);
+                    cry_sm.state = CRY_STATE_IDLE;
+                    break;
+                }
+                if (dur > CRY_BURST_MAX_MS) {
+                    printf("CRY: [REJECT LONG] %u ms\n", dur);
+                    cry_sm.state = CRY_STATE_IDLE;
+                    break;
+                }
+                record_burst(now_ms);
+                uint8_t recent = count_recent_bursts(now_ms);
+                printf("CRY: [VALID BURST] %u ms, peak=%.1f dB, bursts=%u/%u\n",
+                       dur, cry_sm.burst_peak_raw_db, recent, CRY_BURST_COUNT_REQUIRED);
+                cry_sm.state = CRY_STATE_IDLE;
+
+                if (recent >= CRY_BURST_COUNT_REQUIRED) {
+                    uint32_t elapsed = now_ms - cry_sm.last_alert_ms;
+                    if (elapsed >= CRY_ALERT_COOLDOWN_MS || cry_sm.last_alert_ms == 0) {
+                        cry_sm.cry_detected          = true;
+                        cry_sm.episode_active        = true;
+                        cry_sm.confirmed_burst_count = recent;
+                        cry_sm.last_alert_ms         = now_ms;
+                        cry_sm.state                 = CRY_STATE_CONFIRMED;
+                        printf("CRY: *** BABY CRY CONFIRMED *** %u bursts\n", recent);
+                    }
+                }
+            } else if (dur > CRY_BURST_MAX_MS) {
+                printf("CRY: [REJECT LONG - ongoing] %u ms\n", dur);
+                cry_sm.state = CRY_STATE_IDLE;
+            }
+        }
+        break;
+
+    case CRY_STATE_CONFIRMED:
+        cry_sm.episode_active = true;
+        if ((now_ms - cry_sm.last_alert_ms) >= CRY_ALERT_COOLDOWN_MS) {
+            cry_sm.episode_active = false;
+            cry_sm.state          = CRY_STATE_IDLE;
+        }
+        break;
+
+    default:
+        cry_sm.state = CRY_STATE_IDLE;
+        break;
     }
+}
+
+static inline bool    is_baby_cry_detected(void)  { return cry_sm.cry_detected; }
+static inline bool    is_cry_episode_active(void) { return cry_sm.episode_active; }
+static inline uint8_t get_cry_burst_count(void)   { return cry_sm.confirmed_burst_count; }
+
+static void reset_cry_detection(void)
+{
+    cry_sm.state                 = CRY_STATE_IDLE;
+    cry_sm.cry_detected          = false;
+    cry_sm.episode_active        = false;
+    cry_sm.confirmed_burst_count = 0;
+    cry_sm.burst_count_total     = 0;
+    cry_sm.burst_head            = 0;
+    memset(cry_sm.burst_end_times_ms, 0, sizeof(cry_sm.burst_end_times_ms));
+    printf("CRY: Detection reset\n");
 }
 
 void calibrate_baseline_dc(void)
 {
     int32_t total = 0;
-    int err;
-
-    for (int i = 0; i < NUM_SAMPLES; i++)
-    {
-        err = adc_read(adc_dev, &sequence);
-        if (err == 0)
-        {
-            int32_t mv_value = sampleBuffer[0];
-            int32_t adc_vref = adc_ref_internal(adc_dev);
-            adc_raw_to_millivolts(adc_vref, ADC_GAIN, ADC_RESOLUTION, &mv_value);
-            total += mv_value;
+    for (int i = 0; i < NUM_CAL_SAMPLES; i++) {
+        if (adc_read(adc_dev, &sequence) == 0) {
+            int32_t mv = sampleBuffer[0];
+            adc_raw_to_millivolts(adc_ref_internal(adc_dev), ADC_GAIN, ADC_RESOLUTION, &mv);
+            total += mv;
         }
         k_msleep(5);
     }
-
-    baseline_dc = total / NUM_SAMPLES;
+    baseline_dc = total / NUM_CAL_SAMPLES;
     printf("Calibrated baseline DC: %d mV\n", baseline_dc);
 }
 
-static bool calibration_mode = false; // Set to false after calibration
-
-static void log_calibration_data(float rms, float db_raw)
-{
-    // Log raw values for comparison with UT353
-    // Format: RMS | Raw dB | Filtered dB | Baseline DC
-    printf("CALIB | RMS=%.2f | dB_raw=%.2f | dB_filtered=%.2f | baseline=%d mV\n",
-           rms, db_raw, db_filtered, baseline_dc);
-}
-
-// --- Calibration data storage ---
-#define CAL_POINTS 5
-static struct {
-    float reference_db;  // UT353 reading
-    float sensor_db;     // Your sensor reading
-} cal_data[CAL_POINTS] = {0};
-static int cal_index = 0;
-
-static void store_calibration_point(float ref_db, float sensor_db)
-{
-    if (cal_index < CAL_POINTS) {
-        cal_data[cal_index].reference_db = ref_db;
-        cal_data[cal_index].sensor_db = sensor_db;
-        printf("CAL POINT %d: Reference=%.1f dB, Sensor=%.1f dB\n", 
-               cal_index + 1, ref_db, sensor_db);
-        cal_index++;
-    }
-}
-
-static void compute_calibration_curve(void)
-{
-    if (cal_index < 2) {
-        printf("Need at least 2 calibration points\n");
-        return;
-    }
-    
-    // Simple linear fit: sensor_db = m * reference_db + b
-    float sum_xy = 0, sum_x = 0, sum_y = 0, sum_x2 = 0;
-    
-    for (int i = 0; i < cal_index; i++) {
-        float x = cal_data[i].reference_db;
-        float y = cal_data[i].sensor_db;
-        sum_x += x;
-        sum_y += y;
-        sum_xy += x * y;
-        sum_x2 += x * x;
-    }
-    
-    float n = (float)cal_index;
-    float m = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x);
-    float b = (sum_y - m * sum_x) / n;
-    
-    printf("Calibration curve: sensor = %.3f * reference + %.3f\n", m, b);
-    printf("Inverse: reference = (sensor - %.3f) / %.3f\n", b, m);
-}
-
-static void handle_calibration_command(const char *input)
-{
-    if (strncmp(input, "CAL ", 4) == 0) {
-        float ref_db, sensor_db;
-        int parsed = sscanf(input + 4, "%f %f", &ref_db, &sensor_db);
-        
-        if (parsed == 2) {
-            store_calibration_point(ref_db, sensor_db);
-        } else {
-            printf("Invalid format. Use: CAL <reference_db> <sensor_db>\n");
-            printf("Example: CAL 50.5 55.2\n");
-        }
-    }
-    else if (strcmp(input, "COMPUTE") == 0) {
-        compute_calibration_curve();
-    }
-    else if (strcmp(input, "SHOW") == 0) {
-        printf("\nStored calibration points:\n");
-        for (int i = 0; i < cal_index; i++) {
-            printf("  Point %d: Reference=%.1f dB, Sensor=%.1f dB, Diff=%.1f dB\n",
-                   i + 1, 
-                   cal_data[i].reference_db,
-                   cal_data[i].sensor_db,
-                   cal_data[i].sensor_db - cal_data[i].reference_db);
-        }
-    }
-    else if (strcmp(input, "RESET") == 0) {
-        cal_index = 0;
-        printf("Calibration data reset\n");
-    }
-}
-
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN
+// ─────────────────────────────────────────────────────────────────────────────
 int main(void)
 {
     int err;
-    printk("Startup\n");
+    printf("Startup\n");
     update_led_strip(0, 255, 255);
-    /* initialize the work item (do this before gpio_add_callback) */
-    k_work_init(&button_work, button_work_handler);
-    // Initialize the button timer
-    k_timer_init(&button_timer, button_timer_expiry, NULL);
 
+    k_work_init(&button_work, button_work_handler);
+    k_timer_init(&button_timer, button_timer_expiry, NULL);
     update_led_state(BLE_STATE_IDLE);
 
-    if (!device_is_ready(pwr_En.port))
-    {
-        printk("GPIO port not ready\n");
-        return;
-    }
-    gpio_pin_configure_dt(&pwr_En, GPIO_OUTPUT_ACTIVE); // Start HIGH (ACTIVE)
-    gpio_pin_set_dt(&pwr_En, 1);                        // Set HIGH again
+    if (!device_is_ready(pwr_En.port)) { printf("GPIO port not ready\n"); return 0; }
+    gpio_pin_configure_dt(&pwr_En, GPIO_OUTPUT_ACTIVE);
+    gpio_pin_set_dt(&pwr_En, 1);
 
-    // Check if the device is ready
-    if (!gpio_is_ready_dt(&pair_pin))
-    {
-        return;
-    }
-
-    // Configure the pin as input
+    if (!gpio_is_ready_dt(&pair_pin)) return 0;
     gpio_pin_configure_dt(&pair_pin, GPIO_INPUT);
     gpio_pin_interrupt_configure_dt(&pair_pin, GPIO_INT_EDGE_BOTH);
-    /* Initialize and add the callback */
     gpio_init_callback(&input_cb_data, input_pin_isr, BIT(pair_pin.pin));
     gpio_add_callback(pair_pin.port, &input_cb_data);
 
-    if (init_ble() == 0)
-    {
-        printf("BLE Initialized successfully.\n");
-    }
-    else
-    {
-        printf("BLE Initialization failed.\n");
-    }
-    // Start with advertising disabled - user must press button to enable
-    advertising_active = false;
-    update_led_strip(255, 0, 0); // Red LED to indicate not advertising
+    if (init_ble() == 0) printf("BLE Initialized successfully.\n");
+    else                  printf("BLE Initialization failed.\n");
 
-    if (!device_is_ready(adc_dev))
-    {
-        printf("ADC Device not ready\n");
-        return;
-    }
+    advertising_active = false;
+    update_led_strip(255, 0, 0);
+
+    if (!device_is_ready(adc_dev)) { printf("ADC Device not ready\n"); return 0; }
 
     err = adc_channel_setup(adc_dev, &chl0_cfg);
-    if (err != 0)
-    {
-        printf("ADC Setup failed with error %d.\n", err);
-        return;
-    }
+    if (err) { printf("ADC Setup failed: %d\n", err); return 0; }
 
-    // ADC Battery Setup
     err = adc_channel_setup(adc_dev, &battery_ch_cfg);
-    if (err != 0)
-    {
-        printf("Battery ADC Setup failed with error %d.\n", err);
-        return;
-    }
+    if (err) { printf("Battery ADC Setup failed: %d\n", err); return 0; }
 
-    // Init band-pass
     biquad_init_bandpass(&bpf, (float)SAMPLE_RATE_HZ, BPF_FC_HZ, BPF_Q);
 
     printf("Calibrating microphone DC offset...\n");
     calibrate_baseline_dc();
 
-    printf("\n=== CALIBRATION MODE ===\n");
-    printf("Instructions:\n");
-    printf("1. Make a sound at a known level\n");
-    printf("2. Read the dB value from UT353 meter\n");
-    printf("3. Send command: CAL <reference_db> <sensor_db>\n");
-    printf("   Example: CAL 50.5 55.2\n");
-    printf("4. Repeat 5 times at different sound levels (quiet to loud)\n");
-    printf("5. Send: COMPUTE to calculate calibration curve\n");
-    printf("======================\n\n");
-
     while (1)
     {
-        // if (count == 1)
-        // {
-        //     update_led_strip(255, 0, 0);
-        // }
-        // if (count == 2)
-        // {
-        //     update_led_strip(0, 255, 0);
-        // }
-        // if (count == 3)
-        // {
-        //     update_led_strip(0, 0, 255);
-        // }
-        // if (count == 4)
-        // {
-        //     update_led_strip(255, 255, 255);
-        //         gpio_pin_set_dt(&pwr_En, 0);                        // Set HIGH again
-
-        // }
-        // if (count == 5)
-        // {
-        //     count = 0;
-        // }
-
-        // Fixed-size frame sampling with DC blocking HPF and RMS
+        // ── Sample one frame ──────────────────────────────────────────────
         int32_t sum_sq = 0;
-        for (int i = 0; i < FRAME_SAMPLES; i++)
-        {
+        for (int i = 0; i < FRAME_SAMPLES; i++) {
             err = adc_read(adc_dev, &sequence);
-            if (err != 0)
-            {
-                printf("ADC reading failed with error %d.\n", err);
-                continue;
-            }
+            if (err != 0) { printf("ADC read error %d\n", err); continue; }
 
             int32_t mv_value = sampleBuffer[0];
-            int32_t adc_vref = adc_ref_internal(adc_dev);
-            adc_raw_to_millivolts(adc_vref, ADC_GAIN, ADC_RESOLUTION, &mv_value);
+            adc_raw_to_millivolts(adc_ref_internal(adc_dev), ADC_GAIN, ADC_RESOLUTION, &mv_value);
 
-            // Convert to centered float in mV
-            float x = (float)(mv_value - baseline_dc);
-            // One-pole DC blocker (high-pass)
-            float y = x - hpf_prev_x + HPF_R * hpf_prev_y;
+            float x  = (float)(mv_value - baseline_dc);
+
+            // DC-blocking high-pass filter
+            float y  = x - hpf_prev_x + HPF_R * hpf_prev_y;
             hpf_prev_x = x;
             hpf_prev_y = y;
 
-            // Band-pass filter
+            // Band-pass filter (emphasises 800 Hz region)
             float y_bp = biquad_process(&bpf, y);
 
-            // RMS accumulate (limit to safe range)
-            if (y_bp > 3000.0f)
-                y_bp = 3000.0f;
-            if (y_bp < -3000.0f)
-                y_bp = -3000.0f;
+            // Clamp to avoid int32 overflow in accumulator
+            if (y_bp >  3000.0f) y_bp =  3000.0f;
+            if (y_bp < -3000.0f) y_bp = -3000.0f;
             sum_sq += (int32_t)(y_bp * y_bp);
 
-            // Sleep to approximate SAMPLE_RATE_HZ
-            k_busy_wait(1000000 / SAMPLE_RATE_HZ);
+            k_busy_wait(1000000 / SAMPLE_RATE_HZ);   // pacing for 8 kHz
         }
 
+        // ── Compute dB SPL ────────────────────────────────────────────────
         float rms = sqrtf((float)sum_sq / FRAME_SAMPLES);
-        if (rms < 1.0f)
-            rms = 1.0f;
+        if (rms < 1.0f) rms = 1.0f;   // avoid log10(0)
 
-        float db = 20.0f * log10f(rms) + calibration_offset + DB_BPF_GAIN_COMP;
+        // DB_TOTAL_OFFSET = BPF gain compensation (25 dB) + calibration vs UT353 (+7 dB)
+        db          = 20.0f * log10f(rms) + DB_TOTAL_OFFSET;
         db_filtered = SMOOTHING_ALPHA * db + (1.0f - SMOOTHING_ALPHA) * db_filtered;
+        db_int      = (int8_t)(db_filtered);
 
-        db_int = (int8_t)(db_filtered);
-        // printk("Threshold notification sent:(dB=%d)\n", db_int);
-        // if (calibration_mode) {
-        //     log_calibration_data(rms, db);
-        // }
-
-        // Always show current sensor reading
-        printf(">>> CURRENT SENSOR: %.2f dB (dB_raw=%.2f)\n", db_filtered, db);
-        
-        // Display current sound level status (Quiet/Medium/Loud)
-        // printk("Sound Level: %s (dB=%d)\n", get_sound_level_string(db_filtered), db_int);
+        printf("Sound Level: %s (dB=%d)\n", get_sound_level_string(db_filtered), db_int);
         k_msleep(25);
 
-        // dB Alert Notification with hold and cooldown (one per excursion)
+        // ── Baby cry detection ────────────────────────────────────────────
         uint32_t now_ms = k_uptime_get_32();
+        update_cry_detector_raw(db, now_ms);   // pass RAW db (unfiltered)
 
-        if (db_filtered >= threshold_value)
-        {
-            above_ms += FRAME_MS;
-            below_ms = 0;
+        if (is_baby_cry_detected()) {
+            uint8_t cry_alert[3];
+            cry_alert[0] = 1;
+            cry_alert[1] = get_cry_burst_count();
+            cry_alert[2] = is_cry_episode_active() ? 1 : 0;
 
-            // if (notify_armed &&
-            //     above_ms >= TRIGGER_HOLD_MS &&
-            //     (now_ms - last_notify_ms) >= NOTIFY_COOLDOWN_MS)
-            // {
-
-                alertThreshold = 1;
-                // printk("------>>>>>>>>>Value of threshold variable: %d\n", threshold_value);
-
-                if (my_connection)
-                {
-                    int err = bt_gatt_notify(my_connection, alert_threshold_attr,
-                                             &alertThreshold, sizeof(alertThreshold));
-                    if (err)
-                    {
-                        printk("Failed to notify (err %d)\n", err);
-                    }
-                    else
-                    {
-                        // printk("Threshold notification sent: %d (dB=%.1f)\n",
-                        //        alertThreshold, db_filtered);
-                    }
-                }
-            //     last_notify_ms = now_ms;
-            //     notify_armed = 0; // disarm until rearmed below
+            // if (my_connection) {
+            //     err = bt_gatt_notify(my_connection, alert_threshold_attr,
+            //                          cry_alert, sizeof(cry_alert));
+            //     if (err) printf("Failed to notify cry alert (err %d)\n", err);
+            //     else     printf("Baby cry alert sent: %d bursts\n", cry_alert[1]);
             // }
         }
-        else
-        {
-            below_ms += FRAME_MS;
-            above_ms = 0;
+
+        // ── Threshold alert ───────────────────────────────────────────────
+        if (db_filtered >= threshold_value) {
+            above_ms += FRAME_MS;
+            below_ms  = 0;
+            alertThreshold = 1;
+
+            if (my_connection) {
+                err = bt_gatt_notify(my_connection, alert_threshold_attr,
+                                     &alertThreshold, sizeof(alertThreshold));
+                if (err) printf("Failed to notify threshold (err %d)\n", err);
+            }
+        } else {
+            below_ms     += FRAME_MS;
+            above_ms      = 0;
             alertThreshold = 0;
-
-            if (!notify_armed && below_ms >= RESET_HOLD_MS)
-            {
-                notify_armed = 1; // rearm when signal low for long enough
-            }
+            if (!notify_armed && below_ms >= RESET_HOLD_MS) notify_armed = 1;
         }
 
-        // dB Streaming Notification
-        if (sound_streaming_enabled > 0 && my_connection)
-        {
+        // ── dB streaming ─────────────────────────────────────────────────
+        if (sound_streaming_enabled > 0 && my_connection) {
             db_int = (int8_t)(db_filtered);
-            int err = bt_gatt_notify(my_connection, getStreamService_attr, &db_int, sizeof(db_int));
-            if (err)
-            {
-                printk("Failed to notify (err %d)\n", err);
-            }
-            else
-            {
-                printk("dB Notification sent: %d\n", db_int);
-            }
+            err = bt_gatt_notify(my_connection, getStreamService_attr, &db_int, sizeof(db_int));
+            if (err) printf("Failed to stream dB (err %d)\n", err);
+            else     printf("dB Notification sent: %d\n", db_int);
         }
-
-        // else{
-        //     sound_streaming_enabled = 0;
-        // }
-
-        // printf("Sound Level: %.2f dB\n", db);
-
-        // --- Battery Voltage Read ---
-        //  err = adc_read(adc_dev, &battery_sequence);
-        //  if (err != 0) {
-        //      printf("Battery ADC reading failed: %d\n", err);
-        //      continue;
-        //  }
-
-        //  int32_t battery_mv = battery_sample[0];
-        //  int32_t battery_vref = adc_ref_internal(adc_dev);
-        //  adc_raw_to_millivolts(battery_vref, ADC_GAIN, ADC_RESOLUTION, &battery_mv);
-
-        //  // If using a voltage divider (e.g., R1 = R2), multiply accordingly:
-        //  float battery_voltage = battery_mv * 1.0f / 1000.0f; // Convert to volts
-        //  printf("Battery Voltage: %.2f V\n", battery_voltage);
-
-        // k_msleep(SLEEP_TIME_MS);
     }
 
-    // while (1)
-    // {
-    //     err = adc_read(adc_dev, &sequence);
-    //     if (err != 0) {
-    //         continue;
-    //     }
-
-    //     // Remove DC bias (center around 0)
-    //     int16_t sample = sampleBuffer[0] - 1500;
-
-    //     // Optional: scale to 16-bit range
-    //     sample <<= 4;
-
-    //     // Print to serial for logging
-    //     printf("%d\r\n", sample);
-
-    //     // Wait to match desired sampling rate
-    //     k_busy_wait(65); // ~16kHz
-    // }
+    return 0;
 }
