@@ -582,17 +582,16 @@ int main(void)
         update_cry_detector_raw(db, now_ms);   // pass RAW db (unfiltered)
 
         if (is_baby_cry_detected()) {
-            uint8_t cry_alert[3];
-            cry_alert[0] = 1;
-            cry_alert[1] = get_cry_burst_count();
-            cry_alert[2] = is_cry_episode_active() ? 1 : 0;
-
-            // if (my_connection) {
-            //     err = bt_gatt_notify(my_connection, alert_threshold_attr,
-            //                          cry_alert, sizeof(cry_alert));
-            //     if (err) printf("Failed to notify cry alert (err %d)\n", err);
-            //     else     printf("Baby cry alert sent: %d bursts\n", cry_alert[1]);
-            // }
+            baby_cry_detected = 1;
+            
+            if (my_connection) {
+                err = bt_gatt_notify(my_connection, baby_cry_attr,
+                                     &baby_cry_detected, sizeof(baby_cry_detected));
+                if (err) printf("Failed to notify baby cry (err %d)\n", err);
+                else     printf("Baby Cry Notification sent: %d\n", baby_cry_detected);}
+        } else if (!is_cry_episode_active()) {
+            // Reset baby cry flag when episode ends
+            baby_cry_detected = 0;
         }
 
         // ── Threshold alert ───────────────────────────────────────────────

@@ -42,6 +42,10 @@
 #define BT_UUID_THRESHOLD_ALERT_SERVICE_VAL      BT_UUID_128_ENCODE(0x4fafc203, 0x1fb5, 0x459e, 0x8fcc, 0xc5c9c331914d)
 #define BT_UUID_THRESHOLD_ALERT_CHARACTERISTIC_VAL BT_UUID_128_ENCODE(0xbeb54840, 0x36e1, 0x4688, 0xb7f5, 0xea07361b26aa)
 
+// BABY_CRY_SERVICE=4fafc205-1fb5-459e-8fcc-c5c9c3319151
+// BABY_CRY_CHARACTERISTIC=beb54842-36e1-4688-b7f5-ea07361b26af
+#define BT_UUID_BABY_CRY_SERVICE_VAL             BT_UUID_128_ENCODE(0x4fafc205, 0x1fb5, 0x459e, 0x8fcc, 0xc5c9c3319151)
+#define BT_UUID_BABY_CRY_CHARACTERISTIC_VAL      BT_UUID_128_ENCODE(0xbeb54842, 0x36e1, 0x4688, 0xb7f5, 0xea07361b26af)
 
 //
 // int MICSENSE_service_init (void);
@@ -58,6 +62,8 @@ extern bool notify_enabled;
 
 extern const struct bt_gatt_attr *alert_threshold_attr;
 extern const struct bt_gatt_attr *getStreamService_attr;
+extern const struct bt_gatt_attr *baby_cry_attr;
+extern uint8_t baby_cry_detected;
 // extern volatile bool ble_ready = false;
 // void update_led_strip(uint8_t r, uint8_t g, uint8_t b);
 // void update_led(uint8_t index, uint8_t r, uint8_t g, uint8_t b);

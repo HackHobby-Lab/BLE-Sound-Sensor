@@ -30,6 +30,9 @@
 #define BT_UUID_THRESHOLD_ALERT_SERVICE          BT_UUID_DECLARE_128(BT_UUID_THRESHOLD_ALERT_SERVICE_VAL)
 #define BT_UUID_THRESHOLD_ALERT_CHARACTERISTIC   BT_UUID_DECLARE_128(BT_UUID_THRESHOLD_ALERT_CHARACTERISTIC_VAL)
 
+#define BT_UUID_BABY_CRY_SERVICE                 BT_UUID_DECLARE_128(BT_UUID_BABY_CRY_SERVICE_VAL)
+#define BT_UUID_BABY_CRY_CHARACTERISTIC          BT_UUID_DECLARE_128(BT_UUID_BABY_CRY_CHARACTERISTIC_VAL)
+
 #define BT_UUID_MICSENESE BT_UUID_DECLARE_128(BT_UUID_MICSENESE_VAL)
 #define MAX_TRANSMIT_SIZE 1024
 volatile bool ble_ready = false;
@@ -43,6 +46,7 @@ static uint8_t sound_level = 0;          // Simulated sound
 uint8_t sound_streaming_enabled = 0;
 static bool threshold_alert_enabled = false;
 uint8_t alertThreshold;
+uint8_t baby_cry_detected = 0;           // Baby cry detection status (0 or 1)
 
 
 int MICSENSE_service_init(void)
@@ -128,6 +132,15 @@ const uint8_t *value = attr->user_data;
 return bt_gatt_attr_read(conn, attr, buf, len, offset, value, sizeof(uint8_t));
 }
 
+static ssize_t read_baby_cry(struct bt_conn *conn,
+    const struct bt_gatt_attr *attr,
+    void *buf,
+    uint16_t len,
+    uint16_t offset)
+{
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &baby_cry_detected, sizeof(uint8_t));
+}
+
 // GATT service definition with read/write characteristics
 BT_GATT_SERVICE_DEFINE(setThreshold,
                        BT_GATT_PRIMARY_SERVICE(BT_UUID_SET_THRESHOLD_SERVICE),
@@ -201,6 +214,18 @@ BT_GATT_SERVICE_DEFINE(getStreamService,
     BT_GATT_CCC(on_cccd_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE)
 );
 
+// Baby cry detection alert service
+const struct bt_gatt_attr *baby_cry_attr;
+BT_GATT_SERVICE_DEFINE(babyCrySrvc,
+    BT_GATT_PRIMARY_SERVICE(BT_UUID_BABY_CRY_SERVICE),
+    BT_GATT_CHARACTERISTIC(BT_UUID_BABY_CRY_CHARACTERISTIC,
+                           BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+                           BT_GATT_PERM_READ,
+                           read_baby_cry, NULL, &baby_cry_detected),  // Read/Notify characteristic
+    
+    BT_GATT_CCC(on_cccd_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE)
+);
+
 
 
 
@@ -208,6 +233,7 @@ void setup_alert_service(void)
 {
     alert_threshold_attr = &alertThresholdSrvc.attrs[1];
     getStreamService_attr = &getStreamService.attrs[1];
+    baby_cry_attr = &babyCrySrvc.attrs[1];
 }
 
 
