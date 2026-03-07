@@ -74,6 +74,9 @@ static int16_t dc_bias = 0;
 static volatile bool pipeline_running = false;
 static bool dc_calibrated = false;
 
+// ─── Noise gate: squelch output when RMS is below threshold ─────────────────
+#define NOISE_GATE_THRESHOLD 20  // raw ADC counts (~5 mV at gain 1/6)
+
 // ─── Globals required by micsense_service.c externs ─────────────────────────
 uint8_t r = 0, g = 0, b = 0;
 float db = 0.0f;
@@ -427,9 +430,34 @@ int main(void)
             continue;
         }
 
+        // Noise gate: compute RMS, silence frame if below threshold
+        int32_t rms_sum = 0;
+        for (int i = 0; i < FRAME_SAMPLES; i++) {
+            int32_t s = (int32_t)ready_buf[i] - dc_bias;
+            rms_sum += s * s;
+        }
+        uint32_t rms = 0;
+        {   // integer sqrt
+            uint32_t val = (uint32_t)(rms_sum / FRAME_SAMPLES);
+            uint32_t guess = val;
+            if (guess > 0) {
+                for (int j = 0; j < 10; j++) {
+                    guess = (guess + val / guess) / 2;
+                }
+            }
+            rms = guess;
+        }
+
         // ADPCM encode 320 samples → 164-byte packet
         uint8_t pkt[ADPCM_PKT_SIZE];
-        adpcm_encode_frame(ready_buf, pkt);
+        if (rms < NOISE_GATE_THRESHOLD) {
+            // Send silence: reset encoder, emit zero packet
+            enc_pred = 0;
+            enc_idx = 0;
+            memset(pkt, 0, ADPCM_PKT_SIZE);
+        } else {
+            adpcm_encode_frame(ready_buf, pkt);
+        }
 
         // BLE notify
         bt_gatt_notify(my_connection, audio_data_attr, pkt, ADPCM_PKT_SIZE);
