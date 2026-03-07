@@ -49,7 +49,6 @@ static struct k_work button_work;
 bool status = false;
 int count = 0;
 static bool advertising_active = false;
-#define AUDIO_BUFFER_SIZE 16000 // e.g., 1 second at 16 kHz
 int16_t audio_buffer[AUDIO_BUFFER_SIZE];
 volatile uint32_t audio_write_index = 0;
 
@@ -532,12 +531,39 @@ int main(void)
     if (err) { printf("Battery ADC Setup failed: %d\n", err); return 0; }
 
     biquad_init_bandpass(&bpf, (float)SAMPLE_RATE_HZ, BPF_FC_HZ, BPF_Q);
+    audio_init();
 
     printf("Calibrating microphone DC offset...\n");
     calibrate_baseline_dc();
 
     while (1)
     {
+        // ── Dedicated audio recording loop (cycle-accurate timing) ─────
+        if (audio_recording) {
+            printf("Audio: Recording at %d Hz...\n", SAMPLE_RATE_HZ);
+            uint32_t cycles_per_sample = sys_clock_hw_cycles_per_sec() / SAMPLE_RATE_HZ;
+            uint32_t next_cycle = k_cycle_get_32();
+
+            while (audio_recording && audio_write_index < AUDIO_BUFFER_SIZE) {
+                next_cycle += cycles_per_sample;
+
+                err = adc_read(adc_dev, &sequence);
+                if (err == 0) {
+                    int32_t mv_value = sampleBuffer[0];
+                    adc_raw_to_millivolts(adc_ref_internal(adc_dev),
+                                          ADC_GAIN, ADC_RESOLUTION, &mv_value);
+                    audio_buffer[audio_write_index++] = (int16_t)mv_value;
+                }
+
+                // Spin until exact next sample time
+                while ((int32_t)(next_cycle - k_cycle_get_32()) > 0) { }
+            }
+            audio_recording = false;
+            audio_status = AUDIO_STATUS_IDLE;
+            printf("Audio: Recording done (%u samples)\n", audio_write_index);
+            continue;
+        }
+
         // ── Sample one frame ──────────────────────────────────────────────
         int32_t sum_sq = 0;
         for (int i = 0; i < FRAME_SAMPLES; i++) {
@@ -583,7 +609,7 @@ int main(void)
 
         if (is_baby_cry_detected()) {
             baby_cry_detected = 1;
-            
+
             if (my_connection) {
                 err = bt_gatt_notify(my_connection, baby_cry_attr,
                                      &baby_cry_detected, sizeof(baby_cry_detected));

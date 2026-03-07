@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mic-Sense BLE Monitor</title>
+<style>
+  :root {
+    --bg: #f5f7fa; --card: #ffffff; --accent: #4a90d9;
+    --green: #27ae60; --red: #e74c3c; --orange: #f39c12;
+    --text: #2c3e50; --muted: #95a5a6; --border: #e0e4e8;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .header { background: var(--accent); color: white; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+  .header h1 { font-size: 1.3rem; font-weight: 600; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+  .status-dot.connected { background: var(--green); }
+  .status-dot.disconnected { background: var(--red); }
+  .container { max-width: 800px; margin: 0 auto; padding: 16px; }
+  .card { background: var(--card); border-radius: 10px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .btn { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.9rem; font-weight: 500; transition: opacity 0.2s; }
+  .btn:hover { opacity: 0.85; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: white; }
+  .btn-danger { background: var(--red); color: white; }
+  .btn-success { background: var(--green); color: white; }
+  .btn-orange { background: var(--orange); color: white; }
+  .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* Connection */
+  .conn-row { display: flex; align-items: center; gap: 12px; }
+  .conn-status { font-size: 0.9rem; }
+
+  /* Stats grid */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .stat { text-align: center; padding: 12px; border-radius: 8px; background: var(--bg); }
+  .stat-value { font-size: 1.8rem; font-weight: 700; }
+  .stat-label { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
+
+  /* Sound meter */
+  .meter-bar { height: 28px; background: var(--bg); border-radius: 14px; overflow: hidden; position: relative; }
+  .meter-fill { height: 100%; border-radius: 14px; transition: width 0.15s, background 0.3s; min-width: 2%; }
+  .meter-label { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-size: 0.85rem; font-weight: 600; }
+
+  /* Baby cry alert */
+  .cry-alert { display: none; padding: 16px; border-radius: 8px; background: #fde8e8; border: 2px solid var(--red); text-align: center; animation: pulse 1s infinite; }
+  .cry-alert.active { display: block; }
+  .cry-alert h3 { color: var(--red); font-size: 1.2rem; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
+
+  /* Audio waveform */
+  .waveform-container { margin-top: 12px; }
+  canvas.waveform { width: 100%; height: 100px; background: var(--bg); border-radius: 6px; }
+  .progress-bar { height: 6px; background: var(--bg); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.2s; }
+
+  /* Threshold slider */
+  .threshold-row { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+  .threshold-row input[type="range"] { flex: 1; }
+  .threshold-val { font-weight: 600; min-width: 50px; text-align: center; }
+
+  /* Log */
+  .log { max-height: 200px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 0.8rem; background: #1e1e2e; color: #cdd6f4; border-radius: 6px; padding: 10px; }
+  .log-entry { padding: 2px 0; border-bottom: 1px solid #313244; }
+  .log-entry.error { color: #f38ba8; }
+  .log-entry.success { color: #a6e3a1; }
+  .log-entry.warn { color: #f9e2af; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Mic-Sense BLE Monitor</h1>
+  <div class="conn-status">
+    <span class="status-dot disconnected" id="statusDot"></span>
+    <span id="connLabel">Disconnected</span>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Connection -->
+  <div class="card">
+    <h2>Connection</h2>
+    <div class="conn-row">
+      <button class="btn btn-primary" id="btnConnect" onclick="connectDevice()">Connect</button>
+      <button class="btn btn-danger" id="btnDisconnect" onclick="disconnectDevice()" disabled>Disconnect</button>
+    </div>
+  </div>
+
+  <!-- Device Status -->
+  <div class="card" id="statusCard" style="display:none;">
+    <h2>Device Status</h2>
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-value" id="batteryVal">--</div>
+        <div class="stat-label">Battery %</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="thresholdVal">--</div>
+        <div class="stat-label">Threshold dB</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="dbVal">--</div>
+        <div class="stat-label">Sound dB</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="alertVal">--</div>
+        <div class="stat-label">Alert</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Baby Cry Alert -->
+  <div class="cry-alert" id="cryAlert">
+    <h3>Baby Cry Detected!</h3>
+    <p>The sensor has detected a baby crying.</p>
+  </div>
+
+  <!-- Sound Level Monitor -->
+  <div class="card" id="soundCard" style="display:none;">
+    <h2>Sound Level</h2>
+    <div class="meter-bar">
+      <div class="meter-fill" id="meterFill" style="width:2%; background:var(--green);"></div>
+      <span class="meter-label" id="meterLabel">-- dB</span>
+    </div>
+    <div class="threshold-row">
+      <span>Threshold:</span>
+      <input type="range" id="thresholdSlider" min="30" max="100" value="50">
+      <span class="threshold-val" id="thresholdDisplay">50 dB</span>
+      <button class="btn btn-primary" onclick="setThreshold()">Set</button>
+    </div>
+    <div class="btn-group" style="margin-top:12px;">
+      <button class="btn btn-success" id="btnStartStream" onclick="toggleStream(true)">Start Stream</button>
+      <button class="btn btn-danger" id="btnStopStream" onclick="toggleStream(false)" disabled>Stop Stream</button>
+    </div>
+  </div>
+
+  <!-- Audio Recording -->
+  <div class="card" id="audioCard" style="display:none;">
+    <h2>Audio Recording</h2>
+    <div class="btn-group">
+      <button class="btn btn-success" id="btnStartRec" onclick="startRecording()">Start Recording</button>
+      <button class="btn btn-danger" id="btnStopRec" onclick="stopRecording()" disabled>Stop Recording</button>
+      <button class="btn btn-orange" id="btnTransfer" onclick="requestTransfer()">Download Audio</button>
+      <button class="btn btn-primary" id="btnPlay" onclick="playAudio()" disabled>Play</button>
+      <button class="btn btn-primary" id="btnSave" onclick="saveAudio()" disabled>Save WAV</button>
+    </div>
+    <div class="progress-bar" id="xferProgress" style="display:none;">
+      <div class="progress-fill" id="xferFill"></div>
+    </div>
+    <div class="waveform-container">
+      <canvas class="waveform" id="waveformCanvas"></canvas>
+    </div>
+    <p style="font-size:0.8rem;color:var(--muted);margin-top:8px;">
+      Records up to 2 seconds of audio at 8 kHz on the device, then transfers via BLE.
+    </p>
+  </div>
+
+  <!-- Log -->
+  <div class="card">
+    <h2>Event Log</h2>
+    <div class="log" id="logBox"></div>
+  </div>
+
+</div>
+
+<script>
+// ── BLE UUIDs ────────────────────────────────────────────────────────────────
+const UUID = {
+  SET_THRESHOLD_SVC:  '4fafc201-1fb5-459e-8fcc-c5c9c331914b',
+  SET_THRESHOLD_CHR:  'beb5483e-36e1-4688-b7f5-ea07361b26a8',
+  GET_THRESHOLD_SVC:  '4fafc202-1fb5-459e-8fcc-c5c9c331914c',
+  GET_THRESHOLD_CHR:  'beb5483f-36e1-4688-b7f5-ea07361b26a9',
+  GET_BATTERY_SVC:    '4fafc203-1fb5-459e-8fcc-c5c9c331914a',
+  GET_BATTERY_CHR:    'beb54840-36e1-4688-b7f5-ea07361b26ab',
+  SOUND_LEVEL_SVC:    '4fafc203-1fb5-459e-8fcc-c5c9c331914e',
+  SOUND_LEVEL_CHR:    'beb54840-36e1-4688-b7f5-ea07361b26ac',
+  SET_STREAM_SVC:     '4fafc203-1fb5-459e-8fcc-c5c9c331914f',
+  SET_STREAM_CHR:     'beb54840-36e1-4688-b7f5-ea07361b26ad',
+  ALERT_SVC:          '4fafc203-1fb5-459e-8fcc-c5c9c331914d',
+  ALERT_CHR:          'beb54840-36e1-4688-b7f5-ea07361b26aa',
+  BABY_CRY_SVC:       '4fafc205-1fb5-459e-8fcc-c5c9c3319151',
+  BABY_CRY_CHR:       'beb54842-36e1-4688-b7f5-ea07361b26af',
+  AUDIO_SVC:          '4fafc206-1fb5-459e-8fcc-c5c9c3319152',
+  AUDIO_CTRL_CHR:     'beb54843-36e1-4688-b7f5-ea07361b26b0',
+  AUDIO_DATA_CHR:     'beb54844-36e1-4688-b7f5-ea07361b26b1',
+};
+
+const ALL_SERVICES = [
+  UUID.SET_THRESHOLD_SVC, UUID.GET_THRESHOLD_SVC, UUID.GET_BATTERY_SVC,
+  UUID.SOUND_LEVEL_SVC, UUID.SET_STREAM_SVC, UUID.ALERT_SVC,
+  UUID.BABY_CRY_SVC, UUID.AUDIO_SVC,
+];
+
+// ── State ────────────────────────────────────────────────────────────────────
+let device = null, server = null;
+let chars = {};  // characteristic handles keyed by UUID
+let audioChunks = [];
+let audioTotalChunks = 0;
+let audioBuffer = null;  // reconstructed Int16Array
+let streaming = false;
+
+// ── Logging ──────────────────────────────────────────────────────────────────
+function log(msg, cls = '') {
+  const box = document.getElementById('logBox');
+  const ts = new Date().toLocaleTimeString();
+  box.innerHTML += `<div class="log-entry ${cls}">[${ts}] ${msg}</div>`;
+  box.scrollTop = box.scrollHeight;
+}
+
+// ── UI helpers ───────────────────────────────────────────────────────────────
+function setConnected(connected) {
+  const dot = document.getElementById('statusDot');
+  dot.className = 'status-dot ' + (connected ? 'connected' : 'disconnected');
+  document.getElementById('connLabel').textContent = connected ? 'Connected' : 'Disconnected';
+  document.getElementById('btnConnect').disabled = connected;
+  document.getElementById('btnDisconnect').disabled = !connected;
+  ['statusCard', 'soundCard', 'audioCard'].forEach(id => {
+    document.getElementById(id).style.display = connected ? 'block' : 'none';
+  });
+  if (!connected) {
+    document.getElementById('cryAlert').classList.remove('active');
+  }
+}
+
+function updateMeter(db) {
+  const pct = Math.min(100, Math.max(0, (db / 120) * 100));
+  const fill = document.getElementById('meterFill');
+  fill.style.width = pct + '%';
+  if (db < 50) fill.style.background = 'var(--green)';
+  else if (db < 70) fill.style.background = 'var(--orange)';
+  else fill.style.background = 'var(--red)';
+  document.getElementById('meterLabel').textContent = db + ' dB';
+  document.getElementById('dbVal').textContent = db;
+}
+
+// ── BLE Connection ───────────────────────────────────────────────────────────
+async function connectDevice() {
+  try {
+    log('Requesting BLE device...');
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ name: 'Mic-Sense' }],
+      optionalServices: ALL_SERVICES,
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    log('Connecting to GATT server...', 'warn');
+    server = await device.gatt.connect();
+    log('Connected to ' + device.name, 'success');
+    setConnected(true);
+    await discoverServices();
+  } catch (e) {
+    log('Connection failed: ' + e.message, 'error');
+  }
+}
+
+function disconnectDevice() {
+  if (device && device.gatt.connected) device.gatt.disconnect();
+}
+
+function onDisconnected() {
+  log('Device disconnected', 'warn');
+  setConnected(false);
+  chars = {};
+  streaming = false;
+  document.getElementById('btnStartStream').disabled = false;
+  document.getElementById('btnStopStream').disabled = true;
+}
+
+// ── Service Discovery ────────────────────────────────────────────────────────
+async function discoverServices() {
+  async function getChar(svcUuid, chrUuid) {
+    try {
+      const svc = await server.getPrimaryService(svcUuid);
+      const chr = await svc.getCharacteristic(chrUuid);
+      chars[chrUuid] = chr;
+      return chr;
+    } catch (e) {
+      log('Service ' + svcUuid.slice(0, 8) + ' not found', 'warn');
+      return null;
+    }
+  }
+
+  // Discover all characteristics
+  await Promise.all([
+    getChar(UUID.SET_THRESHOLD_SVC, UUID.SET_THRESHOLD_CHR),
+    getChar(UUID.GET_THRESHOLD_SVC, UUID.GET_THRESHOLD_CHR),
+    getChar(UUID.GET_BATTERY_SVC, UUID.GET_BATTERY_CHR),
+    getChar(UUID.SOUND_LEVEL_SVC, UUID.SOUND_LEVEL_CHR),
+    getChar(UUID.SET_STREAM_SVC, UUID.SET_STREAM_CHR),
+    getChar(UUID.ALERT_SVC, UUID.ALERT_CHR),
+    getChar(UUID.BABY_CRY_SVC, UUID.BABY_CRY_CHR),
+  ]);
+
+  // Audio service has two characteristics under one service
+  try {
+    const audioSvc = await server.getPrimaryService(UUID.AUDIO_SVC);
+    chars[UUID.AUDIO_CTRL_CHR] = await audioSvc.getCharacteristic(UUID.AUDIO_CTRL_CHR);
+    chars[UUID.AUDIO_DATA_CHR] = await audioSvc.getCharacteristic(UUID.AUDIO_DATA_CHR);
+  } catch (e) {
+    log('Audio service not found', 'warn');
+  }
+
+  // Read initial values
+  await readBattery();
+  await readThreshold();
+
+  // Subscribe to notifications
+  await subscribeNotify(UUID.SOUND_LEVEL_CHR, onSoundLevel);
+  await subscribeNotify(UUID.ALERT_CHR, onAlert);
+  await subscribeNotify(UUID.BABY_CRY_CHR, onBabyCry);
+  await subscribeNotify(UUID.AUDIO_DATA_CHR, onAudioData);
+
+  log('All services discovered', 'success');
+}
+
+async function subscribeNotify(chrUuid, handler) {
+  const chr = chars[chrUuid];
+  if (!chr) return;
+  try {
+    chr.addEventListener('characteristicvaluechanged', handler);
+    await chr.startNotifications();
+    log('Subscribed to ' + chrUuid.slice(0, 8), 'success');
+  } catch (e) {
+    log('Notify subscribe failed: ' + e.message, 'error');
+  }
+}
+
+// ── Read Values ──────────────────────────────────────────────────────────────
+async function readBattery() {
+  const chr = chars[UUID.GET_BATTERY_CHR];
+  if (!chr) return;
+  try {
+    const val = await chr.readValue();
+    const battery = val.getUint8(0);
+    document.getElementById('batteryVal').textContent = battery;
+    log('Battery: ' + battery + '%');
+  } catch (e) { log('Battery read failed', 'error'); }
+}
+
+async function readThreshold() {
+  const chr = chars[UUID.GET_THRESHOLD_CHR];
+  if (!chr) return;
+  try {
+    const val = await chr.readValue();
+    const th = val.getUint8(0);
+    document.getElementById('thresholdVal').textContent = th;
+    document.getElementById('thresholdSlider').value = th;
+    document.getElementById('thresholdDisplay').textContent = th + ' dB';
+    log('Threshold: ' + th + ' dB');
+  } catch (e) { log('Threshold read failed', 'error'); }
+}
+
+// ── Notification Handlers ────────────────────────────────────────────────────
+function onSoundLevel(event) {
+  const db = event.target.value.getInt8(0);
+  updateMeter(db);
+}
+
+function onAlert(event) {
+  const alert = event.target.value.getUint8(0);
+  document.getElementById('alertVal').textContent = alert ? 'YES' : 'No';
+  document.getElementById('alertVal').style.color = alert ? 'var(--red)' : 'var(--green)';
+  if (alert) log('Threshold alert triggered!', 'warn');
+}
+
+function onBabyCry(event) {
+  const cry = event.target.value.getUint8(0);
+  const el = document.getElementById('cryAlert');
+  if (cry) {
+    el.classList.add('active');
+    log('BABY CRY DETECTED!', 'error');
+    if (Notification.permission === 'granted') {
+      new Notification('Mic-Sense Alert', { body: 'Baby cry detected!' });
+    }
+  } else {
+    el.classList.remove('active');
+  }
+}
+
+function onAudioData(event) {
+  const dv = event.target.value;
+  if (dv.byteLength < 4) return;
+  const chunkIndex = dv.getUint16(0, true);
+  const totalChunks = dv.getUint16(2, true);
+
+  if (chunkIndex === 0) {
+    audioChunks = new Array(totalChunks);
+    audioTotalChunks = totalChunks;
+    document.getElementById('xferProgress').style.display = 'block';
+    log('Audio transfer started (' + totalChunks + ' chunks)', 'warn');
+  }
+
+  // Extract audio data (everything after 4-byte header)
+  const rawBuf = dv.buffer.slice ? dv.buffer.slice(dv.byteOffset + 4, dv.byteOffset + dv.byteLength)
+                                 : dv.buffer.slice(4);
+  const chunkData = new Uint8Array(rawBuf);
+  audioChunks[chunkIndex] = chunkData;
+
+  // Update progress
+  const received = audioChunks.filter(c => c).length;
+  const pct = (received / totalChunks * 100).toFixed(0);
+  document.getElementById('xferFill').style.width = pct + '%';
+
+  if (received === totalChunks) {
+    log('Audio transfer complete', 'success');
+    reconstructAudio();
+  }
+}
+
+// ── Audio Reconstruction ─────────────────────────────────────────────────────
+function reconstructAudio() {
+  let totalBytes = 0;
+  audioChunks.forEach(c => totalBytes += c.length);
+
+  const raw = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (let i = 0; i < audioChunks.length; i++) {
+    raw.set(audioChunks[i], offset);
+    offset += audioChunks[i].length;
+  }
+
+  // Interpret as Int16 (little-endian, matching nRF52)
+  audioBuffer = new Int16Array(raw.buffer);
+  log('Reconstructed ' + audioBuffer.length + ' samples (' +
+      (audioBuffer.length / 8000).toFixed(2) + 's)');
+
+  document.getElementById('btnPlay').disabled = false;
+  document.getElementById('btnSave').disabled = false;
+  document.getElementById('xferProgress').style.display = 'none';
+  drawWaveform(audioBuffer);
+}
+
+function drawWaveform(samples) {
+  const canvas = document.getElementById('waveformCanvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = canvas.offsetWidth * 2;
+  canvas.height = 200;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const mid = canvas.height / 2;
+  // Find min/max for scaling
+  let minV = Infinity, maxV = -Infinity;
+  for (let i = 0; i < samples.length; i++) {
+    if (samples[i] < minV) minV = samples[i];
+    if (samples[i] > maxV) maxV = samples[i];
+  }
+  const range = Math.max(maxV - minV, 1);
+  const mean = (maxV + minV) / 2;
+
+  ctx.strokeStyle = '#4a90d9';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < samples.length; i++) {
+    const x = (i / samples.length) * canvas.width;
+    const y = mid - ((samples[i] - mean) / range) * (canvas.height - 20);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+// ── Audio Playback ───────────────────────────────────────────────────────────
+function playAudio() {
+  if (!audioBuffer) return;
+  const actx = new (window.AudioContext || window.webkitAudioContext)();
+  const abuf = actx.createBuffer(1, audioBuffer.length, 8000);
+  const ch = abuf.getChannelData(0);
+
+  // Find DC offset (mean) for centering
+  let sum = 0;
+  for (let i = 0; i < audioBuffer.length; i++) sum += audioBuffer[i];
+  const dc = sum / audioBuffer.length;
+
+  // Normalize unsigned 8-bit (0-255) to [-1, 1]
+  let maxAbs = 0;
+  for (let i = 0; i < audioBuffer.length; i++) {
+    const v = Math.abs(audioBuffer[i] - dc);
+    if (v > maxAbs) maxAbs = v;
+  }
+  if (maxAbs === 0) maxAbs = 1;
+  for (let i = 0; i < audioBuffer.length; i++) {
+    ch[i] = (audioBuffer[i] - dc) / maxAbs;
+  }
+
+  const src = actx.createBufferSource();
+  src.buffer = abuf;
+  src.connect(actx.destination);
+  src.start();
+  log('Playing audio (' + (audioBuffer.length / 8000).toFixed(2) + 's)');
+}
+
+// ── Save WAV ─────────────────────────────────────────────────────────────────
+function saveAudio() {
+  if (!audioBuffer) return;
+  const numSamples = audioBuffer.length;
+  const sampleRate = 8000;
+  const bitsPerSample = 16;
+  const numChannels = 1;
+  const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+  const blockAlign = numChannels * bitsPerSample / 8;
+  const dataSize = numSamples * blockAlign;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  function writeStr(offset, str) {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  }
+
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeStr(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  // Remove DC offset for WAV
+  let sum = 0;
+  for (let i = 0; i < numSamples; i++) sum += audioBuffer[i];
+  const dc = Math.round(sum / numSamples);
+
+  for (let i = 0; i < numSamples; i++) {
+    view.setInt16(44 + i * 2, audioBuffer[i] - dc, true);
+  }
+
+  const blob = new Blob([buffer], { type: 'audio/wav' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'micsense_recording_' + Date.now() + '.wav';
+  a.click();
+  URL.revokeObjectURL(url);
+  log('WAV file saved');
+}
+
+// ── Controls ─────────────────────────────────────────────────────────────────
+async function setThreshold() {
+  const val = parseInt(document.getElementById('thresholdSlider').value);
+  const chr = chars[UUID.SET_THRESHOLD_CHR];
+  if (!chr) return;
+  try {
+    await chr.writeValue(new Uint8Array([val]));
+    document.getElementById('thresholdVal').textContent = val;
+    log('Threshold set to ' + val + ' dB', 'success');
+  } catch (e) { log('Set threshold failed: ' + e.message, 'error'); }
+}
+
+async function toggleStream(enable) {
+  const chr = chars[UUID.SET_STREAM_CHR];
+  if (!chr) return;
+  try {
+    await chr.writeValue(new Uint8Array([enable ? 1 : 0]));
+    streaming = enable;
+    document.getElementById('btnStartStream').disabled = enable;
+    document.getElementById('btnStopStream').disabled = !enable;
+    log('Sound streaming ' + (enable ? 'started' : 'stopped'), 'success');
+  } catch (e) { log('Stream toggle failed: ' + e.message, 'error'); }
+}
+
+async function sendAudioCmd(cmd) {
+  const chr = chars[UUID.AUDIO_CTRL_CHR];
+  if (!chr) { log('Audio service not available', 'error'); return; }
+  try {
+    await chr.writeValue(new Uint8Array([cmd]));
+  } catch (e) { log('Audio command failed: ' + e.message, 'error'); }
+}
+
+async function startRecording() {
+  await sendAudioCmd(0x01);
+  document.getElementById('btnStartRec').disabled = true;
+  document.getElementById('btnStopRec').disabled = false;
+  log('Recording started on device', 'success');
+}
+
+async function stopRecording() {
+  await sendAudioCmd(0x02);
+  document.getElementById('btnStartRec').disabled = false;
+  document.getElementById('btnStopRec').disabled = true;
+  log('Recording stopped', 'success');
+}
+
+async function requestTransfer() {
+  audioChunks = [];
+  audioBuffer = null;
+  document.getElementById('btnPlay').disabled = true;
+  document.getElementById('btnSave').disabled = true;
+  await sendAudioCmd(0x03);
+  log('Audio transfer requested', 'warn');
+}
+
+// ── Threshold slider live update ─────────────────────────────────────────────
+document.getElementById('thresholdSlider').addEventListener('input', function () {
+  document.getElementById('thresholdDisplay').textContent = this.value + ' dB';
+});
+
+// ── Request notification permission ──────────────────────────────────────────
+if ('Notification' in window && Notification.permission === 'default') {
+  Notification.requestPermission();
+}
+
+// ── Check Web Bluetooth support ──────────────────────────────────────────────
+if (!navigator.bluetooth) {
+  log('Web Bluetooth is NOT supported in this browser. Use Chrome/Edge on HTTPS or localhost.', 'error');
+  document.getElementById('btnConnect').disabled = true;
+}
+
+log('Mic-Sense BLE Monitor ready. Click Connect to pair.');
+</script>
+</body>
+</html>
