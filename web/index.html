@@ -159,6 +159,19 @@
     </p>
   </div>
 
+  <!-- Live Audio Stream -->
+  <div class="card" id="liveCard" style="display:none;">
+    <h2>Live Audio</h2>
+    <div class="btn-group">
+      <button class="btn btn-success" id="btnLiveStart" onclick="startLiveStream()">Start Live</button>
+      <button class="btn btn-danger" id="btnLiveStop" onclick="stopLiveStream()" disabled>Stop Live</button>
+    </div>
+    <p id="liveStatus" style="margin-top:8px;font-size:0.85rem;color:var(--muted);">Not streaming</p>
+    <p style="font-size:0.8rem;color:var(--muted);margin-top:4px;">
+      Real-time audio from device speaker. No duration limit.
+    </p>
+  </div>
+
   <!-- Log -->
   <div class="card">
     <h2>Event Log</h2>
@@ -218,7 +231,7 @@ function setConnected(connected) {
   document.getElementById('connLabel').textContent = connected ? 'Connected' : 'Disconnected';
   document.getElementById('btnConnect').disabled = connected;
   document.getElementById('btnDisconnect').disabled = !connected;
-  ['statusCard', 'soundCard', 'audioCard'].forEach(id => {
+  ['statusCard', 'soundCard', 'audioCard', 'liveCard'].forEach(id => {
     document.getElementById(id).style.display = connected ? 'block' : 'none';
   });
   if (!connected) {
@@ -382,6 +395,21 @@ function onBabyCry(event) {
 
 function onAudioData(event) {
   const dv = event.target.value;
+  if (dv.byteLength < 3) return;
+
+  if (liveStreaming) {
+    // Live stream mode: [uint16 seq] [uint8 audio data...]
+    const audioData = new Uint8Array(dv.buffer, dv.byteOffset + 2, dv.byteLength - 2);
+    queueLiveAudio(audioData);
+    liveFrameCount++;
+    if (liveFrameCount % 50 === 0) {
+      document.getElementById('liveStatus').textContent =
+        'Streaming... (' + liveFrameCount + ' frames received)';
+    }
+    return;
+  }
+
+  // Transfer mode: [uint16 chunk_index] [uint16 total_chunks] [audio data...]
   if (dv.byteLength < 4) return;
   const chunkIndex = dv.getUint16(0, true);
   const totalChunks = dv.getUint16(2, true);
@@ -393,13 +421,11 @@ function onAudioData(event) {
     log('Audio transfer started (' + totalChunks + ' chunks)', 'warn');
   }
 
-  // Extract audio data (everything after 4-byte header)
   const rawBuf = dv.buffer.slice ? dv.buffer.slice(dv.byteOffset + 4, dv.byteOffset + dv.byteLength)
                                  : dv.buffer.slice(4);
   const chunkData = new Uint8Array(rawBuf);
   audioChunks[chunkIndex] = chunkData;
 
-  // Update progress
   const received = audioChunks.filter(c => c).length;
   const pct = (received / totalChunks * 100).toFixed(0);
   document.getElementById('xferFill').style.width = pct + '%';
@@ -595,6 +621,75 @@ async function requestTransfer() {
   document.getElementById('btnSave').disabled = true;
   await sendAudioCmd(0x03);
   log('Audio transfer requested', 'warn');
+}
+
+// ── Live Audio Streaming ─────────────────────────────────────────────────────
+let liveStreaming = false;
+let liveAudioCtx = null;
+let liveNextTime = 0;
+let liveFrameCount = 0;
+let liveDcOffset = 128;
+let liveDcSamples = 0;
+let liveDcSum = 0;
+
+function queueLiveAudio(uint8Samples) {
+  if (!liveAudioCtx) return;
+
+  // Estimate DC offset from first ~2000 samples
+  if (liveDcSamples < 2000) {
+    for (let i = 0; i < uint8Samples.length && liveDcSamples < 2000; i++) {
+      liveDcSum += uint8Samples[i];
+      liveDcSamples++;
+    }
+    liveDcOffset = liveDcSum / liveDcSamples;
+  }
+
+  const len = uint8Samples.length;
+  const buf = liveAudioCtx.createBuffer(1, len, 8000);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) {
+    ch[i] = (uint8Samples[i] - liveDcOffset) / 128.0;
+  }
+
+  const src = liveAudioCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(liveAudioCtx.destination);
+
+  const now = liveAudioCtx.currentTime;
+  if (liveNextTime < now) {
+    liveNextTime = now + 0.08;  // 80ms initial buffer for jitter
+  }
+  src.start(liveNextTime);
+  liveNextTime += len / 8000;
+}
+
+async function startLiveStream() {
+  liveAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  liveNextTime = 0;
+  liveFrameCount = 0;
+  liveStreaming = true;
+  liveDcSamples = 0;
+  liveDcSum = 0;
+  liveDcOffset = 128;
+
+  await sendAudioCmd(0x04);
+  document.getElementById('btnLiveStart').disabled = true;
+  document.getElementById('btnLiveStop').disabled = false;
+  document.getElementById('liveStatus').textContent = 'Streaming...';
+  log('Live audio streaming started', 'success');
+}
+
+async function stopLiveStream() {
+  liveStreaming = false;
+  await sendAudioCmd(0x05);
+  if (liveAudioCtx) {
+    liveAudioCtx.close();
+    liveAudioCtx = null;
+  }
+  document.getElementById('btnLiveStart').disabled = false;
+  document.getElementById('btnLiveStop').disabled = true;
+  document.getElementById('liveStatus').textContent = 'Not streaming';
+  log('Live audio streaming stopped (' + liveFrameCount + ' frames)', 'success');
 }
 
 // ── Threshold slider live update ─────────────────────────────────────────────

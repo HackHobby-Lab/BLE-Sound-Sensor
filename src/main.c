@@ -564,6 +564,41 @@ int main(void)
             continue;
         }
 
+        // ── Live audio streaming over BLE ────────────────────────────────
+        if (audio_stream_active && my_connection) {
+            uint16_t mtu = bt_gatt_get_mtu(my_connection);
+            if (mtu < 23) mtu = 23;
+            uint16_t max_payload = mtu - 3;     // ATT notification header
+            uint16_t frame_size = max_payload - 2; // 2-byte seq header
+            if (frame_size > 240) frame_size = 240;
+
+            uint8_t frame[244];
+            static uint16_t stream_seq = 0;
+            frame[0] = (uint8_t)(stream_seq & 0xFF);
+            frame[1] = (uint8_t)(stream_seq >> 8);
+            stream_seq++;
+
+            // Sample one frame of 8-bit audio using same timing as recording
+            uint32_t cycles_per_sample = sys_clock_hw_cycles_per_sec() / SAMPLE_RATE_HZ;
+            uint32_t next_cycle = k_cycle_get_32();
+
+            for (uint16_t i = 0; i < frame_size; i++) {
+                next_cycle += cycles_per_sample;
+                err = adc_read(adc_dev, &sequence);
+                if (err == 0) {
+                    int16_t raw = sampleBuffer[0];
+                    if (raw < 0) raw = 0;
+                    frame[2 + i] = (uint8_t)((raw >> 4) & 0xFF);
+                } else {
+                    frame[2 + i] = 128;
+                }
+                while ((int32_t)(next_cycle - k_cycle_get_32()) > 0) { }
+            }
+
+            bt_gatt_notify(my_connection, audio_data_attr, frame, frame_size + 2);
+            continue;
+        }
+
         // ── Sample one frame ──────────────────────────────────────────────
         int32_t sum_sq = 0;
         for (int i = 0; i < FRAME_SAMPLES; i++) {

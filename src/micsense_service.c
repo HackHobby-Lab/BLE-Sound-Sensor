@@ -53,8 +53,8 @@ uint8_t alertThreshold;
 uint8_t baby_cry_detected = 0;           // Baby cry detection status (0 or 1)
 
 volatile bool audio_recording = false;
+volatile bool audio_stream_active = false;
 volatile uint8_t audio_status = AUDIO_STATUS_IDLE;
-uint16_t audio_actual_rate = AUDIO_SAMPLE_RATE;
 static struct k_work_delayable audio_xfer_work;
 static uint32_t audio_xfer_offset = 0;
 
@@ -245,12 +245,7 @@ static ssize_t read_audio_status(struct bt_conn *conn,
     uint16_t len,
     uint16_t offset)
 {
-    // Return [status(1), rate_lo(1), rate_hi(1)] = 3 bytes
-    uint8_t data[3];
-    data[0] = audio_status;
-    data[1] = (uint8_t)(audio_actual_rate & 0xFF);
-    data[2] = (uint8_t)(audio_actual_rate >> 8);
-    return bt_gatt_attr_read(conn, attr, buf, len, offset, data, sizeof(data));
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &audio_status, sizeof(uint8_t));
 }
 
 static ssize_t on_audio_control(struct bt_conn *conn,
@@ -279,6 +274,15 @@ static ssize_t on_audio_control(struct bt_conn *conn,
         printk("Audio: Transfer requested (%u samples)\n", audio_write_index);
         audio_recording = false;
         audio_transfer_start();
+        break;
+    case AUDIO_CMD_STREAM_START:
+        printk("Audio: Live stream started\n");
+        audio_recording = false;
+        audio_stream_active = true;
+        break;
+    case AUDIO_CMD_STREAM_STOP:
+        printk("Audio: Live stream stopped\n");
+        audio_stream_active = false;
         break;
     default:
         printk("Audio: Unknown command 0x%02x\n", cmd);

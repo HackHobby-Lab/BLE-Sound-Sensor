@@ -58,6 +58,8 @@
 #define AUDIO_CMD_START_REC    0x01
 #define AUDIO_CMD_STOP_REC     0x02
 #define AUDIO_CMD_TRANSFER     0x03
+#define AUDIO_CMD_STREAM_START 0x04
+#define AUDIO_CMD_STREAM_STOP  0x05
 
 // Audio status values
 #define AUDIO_STATUS_IDLE          0x00
@@ -84,8 +86,8 @@ extern const struct bt_gatt_attr *baby_cry_attr;
 extern uint8_t baby_cry_detected;
 
 extern volatile bool audio_recording;
+extern volatile bool audio_stream_active;
 extern volatile uint8_t audio_status;
-extern uint16_t audio_actual_rate;
 extern int16_t audio_buffer[];
 extern volatile uint32_t audio_write_index;
 extern const struct bt_gatt_attr *audio_data_attr;
