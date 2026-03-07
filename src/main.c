@@ -1,42 +1,35 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Mic-Sense Audio Streaming Pipeline
+//
+// Capture : SAADC 12-bit → Timer2+PPI @ 16 kHz → DMA double-buffer (320 = 20 ms)
+// Process : DC bias removal → 16-bit PCM → IMA ADPCM encode → 164-byte packet
+// Transport: BLE Notify → web decode → 16 kHz 16-bit live playback
+// ─────────────────────────────────────────────────────────────────────────────
 
-#include <zephyr/device.h>
-#include <zephyr/devicetree.h>
-#include <zephyr/drivers/adc.h>
 #include <zephyr/kernel.h>
-#include <zephyr/sys/printk.h>
-#include <zephyr/sys/util.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
-#include "micsense_service.h"
 #include <zephyr/drivers/led_strip.h>
-#include <stddef.h>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/irq.h>
 #include <string.h>
-#include <errno.h>
-#include <soc.h>
-#include <math.h>
 #include <stdio.h>
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846f
-#endif
+#include <nrfx_saadc.h>
+#include <nrfx_timer.h>
+#include <helpers/nrfx_gppi.h>
+#include <hal/nrf_saadc.h>
 
-#define STRIP_NODE DT_ALIAS(led_strip)
+#include "micsense_service.h"
+
+// ─── LED strip ──────────────────────────────────────────────────────────────
+#define STRIP_NODE       DT_ALIAS(led_strip)
 #define STRIP_NUM_PIXELS DT_PROP(STRIP_NODE, chain_length)
-#define DELAY_TIME K_MSEC(5)
-
-#define LED_BLINK_ADV_SLOW K_MSEC(1000)  // Slow blinking (yellow) for advertising
-#define LED_BLINK_CONN_FAST K_MSEC(200) // Fast blinking (orange) for connecting
-#define LED_CONNECTED_GREEN K_MSEC(0)   // Solid green for connected
-
-
-static enum ble_state current_ble_state = BLE_STATE_IDLE;
-static struct k_timer led_blink_timer;
-static bool led_on = false;
-
 struct led_rgb pixels[STRIP_NUM_PIXELS];
 const struct device *strip = DEVICE_DT_GET(STRIP_NODE);
 
+// ─── GPIO ───────────────────────────────────────────────────────────────────
 #define EN_PIN_NODE DT_NODELABEL(user_output_pin)
 static const struct gpio_dt_spec pwr_En = GPIO_DT_SPEC_GET(EN_PIN_NODE, gpios);
 
@@ -45,222 +38,269 @@ static const struct gpio_dt_spec pair_pin = GPIO_DT_SPEC_GET(PAIR_PIN, gpios);
 
 static struct gpio_callback input_cb_data;
 static struct k_work button_work;
-
-bool status = false;
-int count = 0;
+static struct k_timer button_timer;
+static bool long_press_detected = false;
 static bool advertising_active = false;
-int16_t audio_buffer[AUDIO_BUFFER_SIZE];
-volatile uint32_t audio_write_index = 0;
+static enum ble_state current_ble_state = BLE_STATE_IDLE;
 
-#define SLEEP_TIME_MS 100
-float db = 0.0;
-int16_t db_int = 0;
-#define ADC_NODE DT_NODELABEL(adc)
-static const struct device *adc_dev = DEVICE_DT_GET(ADC_NODE);
-
-#define ADC_RESOLUTION 12
-#define ADC_CHANNEL 0
-#define ADC_PORT SAADC_CH_PSELP_PSELP_AnalogInput0 // AIN0
-#define ADC_REFERENCE ADC_REF_INTERNAL             // 0.6V
-#define ADC_GAIN ADC_GAIN_1_6                      // ADC_REFERENCE * 5
-
-#define BATTERY_ADC_CHANNEL 1                              // Battery
-#define BATTERY_ADC_PORT SAADC_CH_PSELP_PSELP_AnalogInput1 // AIN1
-
-struct adc_channel_cfg chl0_cfg = {
-    .gain = ADC_GAIN,
-    .reference = ADC_REFERENCE,
-    .acquisition_time = ADC_ACQ_TIME_DEFAULT,
-    .channel_id = ADC_CHANNEL,
-#ifdef CONFIG_ADC_NRFX_SAADC
-    .input_positive = ADC_PORT
-#endif
-};
-
-// Config for the battery ADC
-struct adc_channel_cfg battery_ch_cfg = {
-    .gain = ADC_GAIN,
-    .reference = ADC_REFERENCE,
-    .acquisition_time = ADC_ACQ_TIME_DEFAULT,
-    .channel_id = BATTERY_ADC_CHANNEL,
-#ifdef CONFIG_ADC_NRFX_SAADC
-    .input_positive = BATTERY_ADC_PORT
-#endif
-};
-
-int16_t sampleBuffer[1];
-struct adc_sequence sequence = {
-    .channels    = BIT(ADC_CHANNEL),
-    .buffer      = sampleBuffer,
-    .buffer_size = sizeof(sampleBuffer),
-    .resolution  = ADC_RESOLUTION
-};
-
-// ADC Battery Sequence
-int16_t battery_sample[1];
-struct adc_sequence battery_sequence = {
-    .channels    = BIT(BATTERY_ADC_CHANNEL),
-    .buffer      = battery_sample,
-    .buffer_size = sizeof(battery_sample),
-    .resolution  = ADC_RESOLUTION
-};
-
+// ─── BLE advertising ────────────────────────────────────────────────────────
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
     BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_SET_THRESHOLD_SERVICE_VAL),
 };
 
-static struct k_timer button_timer;
-static bool long_press_detected = false;
+// ─── Audio pipeline constants ───────────────────────────────────────────────
+#define STREAM_RATE_HZ   16000
+#define FRAME_SAMPLES    320       // 20 ms @ 16 kHz
+#define ADPCM_DATA_BYTES (FRAME_SAMPLES / 2)  // 160 bytes (4 bits per sample)
+#define ADPCM_HDR_BYTES  4         // [int16 predicted][uint8 step_idx][uint8 rsvd]
+#define ADPCM_PKT_SIZE   (ADPCM_HDR_BYTES + ADPCM_DATA_BYTES)  // 164 bytes
+#define TIMER_CC_16KHZ   1000      // 16 MHz / 1000 = 16 kHz exact
 
+// ─── nrfx peripheral instances ──────────────────────────────────────────────
+static const nrfx_timer_t sample_timer = NRFX_TIMER_INSTANCE(2);
+static uint8_t ppi_channel;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ADC / SAMPLING CONFIGURATION
-// ─────────────────────────────────────────────────────────────────────────────
-#define NUM_SAMPLES      5
-#define SAMPLE_RATE_HZ   8000
-#define FRAME_SAMPLES    64
-#define HPF_R            0.995f   // ~16 Hz high-pass cutoff @ 8 kHz
-#define FRAME_MS         ((1000 * FRAME_SAMPLES) / SAMPLE_RATE_HZ)  // 8 ms
+// ─── DMA double buffers ────────────────────────────────────────────────────
+static int16_t saadc_buf0[FRAME_SAMPLES];
+static int16_t saadc_buf1[FRAME_SAMPLES];
 
-// Band-pass filter centred on baby-cry fundamental (~800 Hz)
-#define BPF_FC_HZ        800.0f
-#define BPF_Q            0.707f
+// ─── ISR → main thread signaling ───────────────────────────────────────────
+K_SEM_DEFINE(frame_sem, 0, 1);
+static int16_t *volatile ready_buf = NULL;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// dB CALIBRATION  (AGC **disabled**)
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// MEASUREMENT REFERENCE:
-//   UT353 reading  : 46 – 48 dBA  (≈ 47 dB average)
-//   Board reading  : 38 – 41 dB   (≈ 39 – 40 dB, filtered int)
-//   Raw dB offset  : UT353 − board ≈ +7 dB
-//
-// HOW THE dB IS COMPUTED:
-//   db = 20 * log10(rms_mV) + DB_TOTAL_OFFSET
-//
-//   DB_TOTAL_OFFSET replaces the old separate calibration_offset + DB_BPF_GAIN_COMP
-//   pair that was tuned for AGC-on.  With AGC disabled the signal chain is
-//   linear so a single scalar offset is the cleanest approach.
-//
-// DERIVATION:
-//   Old offset  = calibration_offset(0) + DB_BPF_GAIN_COMP(25) = 25 dB
-//   Measured gap = +7 dB (board reads 7 dB too low vs. UT353)
-//   New offset  = 25 + 7 = 32 dB
-//
-// If after flashing you still see a consistent offset, adjust DB_TOTAL_OFFSET
-// by the difference:
-//   board too LOW  by N dB  →  increase DB_TOTAL_OFFSET by N
-//   board too HIGH by N dB  →  decrease DB_TOTAL_OFFSET by N
-//
-#define DB_TOTAL_OFFSET  32.0f
+// ─── DC bias (measured at startup from first frame) ─────────────────────────
+static int16_t dc_bias = 0;
+static volatile bool pipeline_running = false;
+static bool dc_calibrated = false;
 
-// EMA smoothing (α = 0.1 → ~10-frame time constant ≈ 80 ms)
-#define SMOOTHING_ALPHA  0.1f
+// ─── Globals required by micsense_service.c externs ─────────────────────────
+uint8_t r = 0, g = 0, b = 0;
+float db = 0.0f;
+int16_t db_int = 0;
+int16_t audio_buffer[AUDIO_BUFFER_SIZE];
+volatile uint32_t audio_write_index = 0;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SOUND LEVEL THRESHOLDS  (kept in real-world dB SPL now that we're calibrated)
-// ─────────────────────────────────────────────────────────────────────────────
-#define QUIET_THRESHOLD_MAX   50.0f   // < 50 dB  → Quiet
-#define MEDIUM_THRESHOLD_MAX  70.0f   // 50–70 dB → Medium
-// > 70 dB → Loud
-
-static float db_filtered = 0.0f;
-static int32_t baseline_dc = 1500;
-
-typedef struct {
-    float a0, a1, a2, b1, b2, z1, z2;
-} biquad_t;
-
-static biquad_t bpf;
-
-
-static float hpf_prev_x = 0.0f;
-static float hpf_prev_y = 0.0f;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// dB ALERT GATING
-// ─────────────────────────────────────────────────────────────────────────────
-#define TRIGGER_HOLD_MS    200
-#define RESET_HOLD_MS      100
-#define NOTIFY_COOLDOWN_MS 400
-
-static uint32_t above_ms   = 0;
-static uint32_t below_ms   = 0;
-static uint32_t last_notify_ms = 0;
-static int notify_armed    = 1;
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// BABY CRY DETECTION  (raw dB burst-counting state machine)
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Now that the dB values are calibrated to real SPL, these thresholds are
-// expressed in actual dB SPL.
-//
-// Typical baby cry: 60 – 80 dB SPL at 1 m.
-// Quiet room (baby sleeping): 40 – 50 dB SPL.
-//
-// Entry threshold is set conservatively low (55 dB) to catch the rising edge
-// of a cry before it reaches full volume, while the lift guard (+6 dB above
-// the rolling baseline) prevents false triggers from slow ambient rises.
-//
-#define CRY_RAW_ENTER_DB          55.0f   // SPL: cry onset (dataset: spikes to 60–71)
-#define CRY_RAW_EXIT_DB           52.0f   // SPL: inter-burst dip / back to baseline
-#define CRY_BURST_MIN_MS          300     // Reject spikes < 300 ms (cough, door)
-#define CRY_BURST_MAX_MS          12000   // Reject continuous sounds > 12 s (TV, fan)
-#define CRY_BURST_COUNT_REQUIRED  2       // Minimum bursts in window to confirm cry
-#define CRY_EPISODE_WINDOW_MS     15000   // Rolling window for burst counting (15 s)
-#define CRY_RISE_GUARD_DB         6.0f    // Must lift ≥ 6 dB above rolling baseline
-#define CRY_ALERT_COOLDOWN_MS     5000    // 5 s between BLE notifications
-#define BASELINE_EMA_ALPHA        0.05f   // Slow baseline tracker (quiet periods only)
-#define BURST_HISTORY_SIZE        8
-
-typedef enum {
-    CRY_STATE_IDLE = 0,
-    CRY_STATE_BURST_ACTIVE,
-    CRY_STATE_CONFIRMED,
-} cry_sm_state_t;
-
-typedef struct {
-    cry_sm_state_t  state;
-    uint32_t        burst_start_ms;
-    float           burst_peak_raw_db;
-    uint32_t        burst_end_times_ms[BURST_HISTORY_SIZE];
-    uint8_t         burst_head;
-    uint8_t         burst_count_total;
-    float           baseline_raw_db;
-    uint32_t        last_alert_ms;
-    bool            cry_detected;
-    bool            episode_active;
-    uint8_t         confirmed_burst_count;
-} baby_cry_sm_t;
-
-static baby_cry_sm_t cry_sm = {
-    .state              = CRY_STATE_IDLE,
-    .baseline_raw_db    = 47.0f,   // initialise near expected quiet-room SPL
-    .last_alert_ms      = 0,
-    .cry_detected       = false,
-    .episode_active     = false,
+// ─── IMA ADPCM tables ──────────────────────────────────────────────────────
+static const int16_t ima_step[89] = {
+    7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,
+    50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,
+    230,253,279,307,337,371,408,449,494,544,598,658,724,796,
+    876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,
+    2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,
+    7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,
+    20350,22385,24623,27086,29794,32767
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DC BASELINE CALIBRATION
-// ─────────────────────────────────────────────────────────────────────────────
-#define NUM_CAL_SAMPLES 5
+static const int8_t ima_idx_adj[16] = {
+    -1,-1,-1,-1, 2, 4, 6, 8,
+    -1,-1,-1,-1, 2, 4, 6, 8
+};
 
+// ─── ADPCM encoder state (persistent across frames) ─────────────────────────
+static int16_t enc_pred = 0;
+static int8_t  enc_idx  = 0;
+
+// ─── Forward declarations ───────────────────────────────────────────────────
+void update_led_strip(uint8_t r, uint8_t g, uint8_t b);
+void update_led_state(enum ble_state state);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SAADC callback (ISR context)
+// ─────────────────────────────────────────────────────────────────────────────
+static void saadc_handler(nrfx_saadc_evt_t const *p_event)
+{
+    switch (p_event->type) {
+    case NRFX_SAADC_EVT_DONE:
+        ready_buf = p_event->data.done.p_buffer;
+        k_sem_give(&frame_sem);
+        break;
+    case NRFX_SAADC_EVT_BUF_REQ:
+        // Re-queue the completed buffer for continuous double-buffered operation.
+        // Safe: main thread processes in <5 ms, this buffer won't be reused for 20 ms.
+        if (ready_buf) {
+            nrfx_saadc_buffer_set((int16_t *)ready_buf, FRAME_SAMPLES);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+// ─── Timer handler (unused, PPI drives sampling) ────────────────────────────
+static void timer_handler(nrf_timer_event_t event, void *ctx)
+{
+    (void)event;
+    (void)ctx;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Audio pipeline init / start / stop
+// ─────────────────────────────────────────────────────────────────────────────
+static void audio_pipeline_init(void)
+{
+    nrfx_err_t err;
+
+    // 1. Connect SAADC IRQ (nrfx needs manual connection in Zephyr)
+    IRQ_CONNECT(SAADC_IRQn, 5, nrfx_isr, nrfx_saadc_irq_handler, 0);
+    irq_enable(SAADC_IRQn);
+
+    // 2. Init SAADC
+    err = nrfx_saadc_init(5);
+    if (err != NRFX_SUCCESS) {
+        printf("SAADC init failed: %d\n", err);
+        return;
+    }
+
+    // 3. Configure channel 0 (AIN0 = microphone)
+    nrfx_saadc_channel_t ch = NRFX_SAADC_DEFAULT_CHANNEL_SE(NRF_SAADC_INPUT_AIN0, 0);
+    ch.channel_config.gain      = NRF_SAADC_GAIN1_6;
+    ch.channel_config.reference = NRF_SAADC_REFERENCE_INTERNAL;
+    ch.channel_config.acq_time  = NRF_SAADC_ACQTIME_10US;
+    err = nrfx_saadc_channels_config(&ch, 1);
+    if (err != NRFX_SUCCESS) {
+        printf("SAADC channel config failed: %d\n", err);
+        return;
+    }
+
+    // 4. Advanced mode: continuous DMA with auto-restart
+    nrfx_saadc_adv_config_t adv = NRFX_SAADC_DEFAULT_ADV_CONFIG;
+    adv.start_on_end = true;  // auto-START after each buffer completes
+    err = nrfx_saadc_advanced_mode_set(BIT(0), NRF_SAADC_RESOLUTION_12BIT,
+                                        &adv, saadc_handler);
+    if (err != NRFX_SUCCESS) {
+        printf("SAADC advanced mode failed: %d\n", err);
+        return;
+    }
+
+    // 5. Connect TIMER2 IRQ
+    IRQ_CONNECT(TIMER2_IRQn, 5, nrfx_isr, nrfx_timer_2_irq_handler, 0);
+
+    // 6. Init Timer2 @ 16 MHz base, CC=1000 → 16 kHz
+    nrfx_timer_config_t tcfg = NRFX_TIMER_DEFAULT_CONFIG(16000000);
+    tcfg.mode      = NRF_TIMER_MODE_TIMER;
+    tcfg.bit_width = NRF_TIMER_BIT_WIDTH_16;
+    err = nrfx_timer_init(&sample_timer, &tcfg, timer_handler);
+    if (err != NRFX_SUCCESS) {
+        printf("Timer init failed: %d\n", err);
+        return;
+    }
+    nrfx_timer_extended_compare(&sample_timer, NRF_TIMER_CC_CHANNEL0,
+                                 TIMER_CC_16KHZ,
+                                 NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK,
+                                 false);  // no interrupt needed
+
+    // 7. PPI: Timer2 COMPARE[0] → SAADC SAMPLE
+    err = nrfx_gppi_channel_alloc(&ppi_channel);
+    if (err != NRFX_SUCCESS) {
+        printf("PPI alloc failed: %d\n", err);
+        return;
+    }
+    nrfx_gppi_channel_endpoints_setup(
+        ppi_channel,
+        nrfx_timer_compare_event_address_get(&sample_timer, NRF_TIMER_CC_CHANNEL0),
+        nrf_saadc_task_address_get(NRF_SAADC, NRF_SAADC_TASK_SAMPLE)
+    );
+
+    printf("Audio pipeline initialized (16 kHz, ADPCM, 164-byte packets)\n");
+}
+
+static void start_audio_pipeline(void)
+{
+    // Reset encoder
+    enc_pred = 0;
+    enc_idx  = 0;
+    dc_calibrated = false;
+
+    // Queue both DMA buffers
+    nrfx_saadc_buffer_set(saadc_buf0, FRAME_SAMPLES);
+    nrfx_saadc_buffer_set(saadc_buf1, FRAME_SAMPLES);
+
+    // Arm SAADC (waits for SAMPLE tasks from PPI)
+    nrfx_saadc_mode_trigger();
+
+    // Enable PPI and start timer
+    nrfx_gppi_channels_enable(BIT(ppi_channel));
+    nrfx_timer_enable(&sample_timer);
+
+    pipeline_running = true;
+    printf("Audio pipeline started\n");
+}
+
+static void stop_audio_pipeline(void)
+{
+    nrfx_timer_disable(&sample_timer);
+    nrfx_gppi_channels_disable(BIT(ppi_channel));
+    nrfx_saadc_abort();
+
+    pipeline_running = false;
+    printf("Audio pipeline stopped\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IMA ADPCM encoder: 320 × int16 PCM → 164-byte packet
+// ─────────────────────────────────────────────────────────────────────────────
+static void adpcm_encode_frame(const int16_t *raw, uint8_t *pkt)
+{
+    // Block header: decoder syncs from these values
+    pkt[0] = (uint8_t)(enc_pred & 0xFF);
+    pkt[1] = (uint8_t)((enc_pred >> 8) & 0xFF);
+    pkt[2] = (uint8_t)enc_idx;
+    pkt[3] = 0;
+
+    for (int i = 0; i < FRAME_SAMPLES; i++) {
+        // DC removal + scale 12-bit centered → 16-bit range
+        int32_t pcm = ((int32_t)raw[i] - dc_bias) * 16;
+        if (pcm >  32767) pcm =  32767;
+        if (pcm < -32768) pcm = -32768;
+
+        // Encode one sample → 4-bit nibble
+        int32_t diff = (int16_t)pcm - enc_pred;
+        uint8_t nibble = 0;
+        int16_t step = ima_step[enc_idx];
+
+        if (diff < 0) { nibble = 8; diff = -diff; }
+        if (diff >= step)     { nibble |= 4; diff -= step; }
+        if (diff >= step / 2) { nibble |= 2; diff -= step / 2; }
+        if (diff >= step / 4) { nibble |= 1; }
+
+        // Decode to update predictor (must match decoder exactly)
+        int32_t delta = step >> 3;
+        if (nibble & 4) delta += step;
+        if (nibble & 2) delta += step >> 1;
+        if (nibble & 1) delta += step >> 2;
+        if (nibble & 8) delta = -delta;
+
+        enc_pred += (int16_t)delta;
+        if (enc_pred >  32767) enc_pred =  32767;
+        if (enc_pred < -32768) enc_pred = -32768;
+
+        int16_t new_idx = enc_idx + ima_idx_adj[nibble];
+        if (new_idx < 0)  new_idx = 0;
+        if (new_idx > 88) new_idx = 88;
+        enc_idx = (int8_t)new_idx;
+
+        // Pack two nibbles per byte (low nibble first)
+        int bpos = ADPCM_HDR_BYTES + (i / 2);
+        if (i & 1) {
+            pkt[bpos] |= (nibble << 4);
+        } else {
+            pkt[bpos] = nibble;
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Button handler (power off / toggle advertising)
+// ─────────────────────────────────────────────────────────────────────────────
 static void button_work_handler(struct k_work *work)
 {
     if (k_timer_status_get(&button_timer) > 0) {
-        // Timer expired before release → long press
-        printf("Long press detected!\n");
+        printf("Long press → power off\n");
         gpio_pin_set_dt(&pwr_En, 0);
-        while (1) {
-            k_sleep(K_FOREVER);
-        }
+        while (1) { k_sleep(K_FOREVER); }
     } else {
-        // Released before timer expired → short press
-        printf("Short press detected. Toggling BLE advertising...\n");
+        printf("Short press → toggle advertising\n");
         int err;
         if (advertising_active) {
             err = bt_le_adv_stop();
@@ -276,221 +316,46 @@ static void button_work_handler(struct k_work *work)
             }
         }
     }
-
-    k_timer_stop(&button_timer); // cleanup
+    k_timer_stop(&button_timer);
 }
 
 void button_timer_expiry(struct k_timer *timer_id)
 {
     long_press_detected = true;
-    k_work_submit(&button_work); // Submit the work handler for long press
+    k_work_submit(&button_work);
 }
 
 void input_pin_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    bool pin_state = gpio_pin_get_dt(&pair_pin);
-
-    if (pin_state) {
-        // button pressed → start timer
+    if (gpio_pin_get_dt(&pair_pin)) {
         k_timer_start(&button_timer, K_SECONDS(3), K_NO_WAIT);
     } else {
-        // button released → schedule work to decide short/long
         k_work_submit(&button_work);
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// LED helpers
+// ─────────────────────────────────────────────────────────────────────────────
 void update_led_strip(uint8_t r, uint8_t g, uint8_t b)
 {
-    // Set the RGB values for all the pixels
-    for (int i = 0; i < STRIP_NUM_PIXELS; i++)
-    {
+    for (int i = 0; i < STRIP_NUM_PIXELS; i++) {
         pixels[i].r = r;
         pixels[i].g = g;
         pixels[i].b = b;
     }
-
-    // Update the LED strip
     led_strip_update_rgb(strip, pixels, STRIP_NUM_PIXELS);
 }
 
 void update_led_state(enum ble_state state)
 {
     current_ble_state = state;
-
-    switch (state)
-    {
-    case BLE_STATE_ADVERTISING:
-         update_led_strip(255, 255, 0); // Yellow
-        break;
-
-    case BLE_STATE_CONNECTING:
-      update_led_strip(255, 165, 0); // Orange
-        break;
-
-    case BLE_STATE_CONNECTED:
-        // k_timer_stop(&led_blink_timer);
-        update_led_strip(0, 255, 0); // Solid green
-        break;
-
-    default:
-        // k_timer_stop(&led_blink_timer);
-        update_led_strip(255, 0, 0); // Solid red (idle/error)
-        break;
+    switch (state) {
+    case BLE_STATE_ADVERTISING: update_led_strip(255, 255, 0);   break;
+    case BLE_STATE_CONNECTING:  update_led_strip(255, 165, 0);   break;
+    case BLE_STATE_CONNECTED:   update_led_strip(0, 255, 0);     break;
+    default:                    update_led_strip(255, 0, 0);     break;
     }
-}
-
-static void biquad_init_bandpass(biquad_t *s, float fs, float f0, float q)
-{
-    float w0     = 2.0f * (float)M_PI * f0 / fs;
-    float sin_w0 = sinf(w0), cos_w0 = cosf(w0);
-    float alpha  = sin_w0 / (2.0f * q);
-    float b0 = q * alpha, b1 = 0.0f, b2 = -q * alpha;
-    float a0 = 1.0f + alpha, a1 = -2.0f * cos_w0, a2 = 1.0f - alpha;
-    s->a0 = b0/a0; s->a1 = b1/a0; s->a2 = b2/a0;
-    s->b1 = a1/a0; s->b2 = a2/a0;
-    s->z1 = 0.0f;  s->z2 = 0.0f;
-}
-
-static inline float biquad_process(biquad_t *s, float x)
-{
-    float y = s->a0 * x + s->z1;
-    s->z1   = s->a1 * x - s->b1 * y + s->z2;
-    s->z2   = s->a2 * x - s->b2 * y;
-    return y;
-}
-
-static const char *get_sound_level_string(float db_value)
-{
-    if (db_value < QUIET_THRESHOLD_MAX)  return "Quiet";
-    if (db_value < MEDIUM_THRESHOLD_MAX) return "Medium";
-    return "Loud";
-}
-
-static uint8_t count_recent_bursts(uint32_t now_ms)
-{
-    uint8_t n    = 0;
-    uint8_t size = (cry_sm.burst_count_total < BURST_HISTORY_SIZE)
-                   ? cry_sm.burst_count_total : BURST_HISTORY_SIZE;
-    for (uint8_t i = 0; i < size; i++) {
-        if ((now_ms - cry_sm.burst_end_times_ms[i]) <= CRY_EPISODE_WINDOW_MS) n++;
-    }
-    return n;
-}
-
-static void record_burst(uint32_t end_ms)
-{
-    cry_sm.burst_end_times_ms[cry_sm.burst_head] = end_ms;
-    cry_sm.burst_head = (cry_sm.burst_head + 1) % BURST_HISTORY_SIZE;
-    cry_sm.burst_count_total++;
-}
-
-void update_cry_detector_raw(float raw_db, uint32_t now_ms)
-{
-    cry_sm.cry_detected = false;
-
-    // Update rolling baseline only during quiet frames
-    if (raw_db < CRY_RAW_EXIT_DB) {
-        cry_sm.baseline_raw_db = BASELINE_EMA_ALPHA * raw_db
-                                 + (1.0f - BASELINE_EMA_ALPHA) * cry_sm.baseline_raw_db;
-    }
-
-    float lift = raw_db - cry_sm.baseline_raw_db;
-
-    switch (cry_sm.state) {
-
-    case CRY_STATE_IDLE:
-        if (raw_db >= CRY_RAW_ENTER_DB && lift >= CRY_RISE_GUARD_DB) {
-            cry_sm.burst_start_ms    = now_ms;
-            cry_sm.burst_peak_raw_db = raw_db;
-            cry_sm.state             = CRY_STATE_BURST_ACTIVE;
-            printf("CRY: [BURST START] raw=%.1f dB, lift=%.1f dB\n", raw_db, lift);
-        }
-        break;
-
-    case CRY_STATE_BURST_ACTIVE:
-        if (raw_db > cry_sm.burst_peak_raw_db) cry_sm.burst_peak_raw_db = raw_db;
-        {
-            uint32_t dur = now_ms - cry_sm.burst_start_ms;
-
-            if (raw_db < CRY_RAW_EXIT_DB) {
-                if (dur < CRY_BURST_MIN_MS) {
-                    printf("CRY: [REJECT SHORT] %u ms, peak=%.1f dB\n",
-                           dur, cry_sm.burst_peak_raw_db);
-                    cry_sm.state = CRY_STATE_IDLE;
-                    break;
-                }
-                if (dur > CRY_BURST_MAX_MS) {
-                    printf("CRY: [REJECT LONG] %u ms\n", dur);
-                    cry_sm.state = CRY_STATE_IDLE;
-                    break;
-                }
-                record_burst(now_ms);
-                uint8_t recent = count_recent_bursts(now_ms);
-                printf("CRY: [VALID BURST] %u ms, peak=%.1f dB, bursts=%u/%u\n",
-                       dur, cry_sm.burst_peak_raw_db, recent, CRY_BURST_COUNT_REQUIRED);
-                cry_sm.state = CRY_STATE_IDLE;
-
-                if (recent >= CRY_BURST_COUNT_REQUIRED) {
-                    uint32_t elapsed = now_ms - cry_sm.last_alert_ms;
-                    if (elapsed >= CRY_ALERT_COOLDOWN_MS || cry_sm.last_alert_ms == 0) {
-                        cry_sm.cry_detected          = true;
-                        cry_sm.episode_active        = true;
-                        cry_sm.confirmed_burst_count = recent;
-                        cry_sm.last_alert_ms         = now_ms;
-                        cry_sm.state                 = CRY_STATE_CONFIRMED;
-                        printf("CRY: *** BABY CRY CONFIRMED *** %u bursts\n", recent);
-                    }
-                }
-            } else if (dur > CRY_BURST_MAX_MS) {
-                printf("CRY: [REJECT LONG - ongoing] %u ms\n", dur);
-                cry_sm.state = CRY_STATE_IDLE;
-            }
-        }
-        break;
-
-    case CRY_STATE_CONFIRMED:
-        cry_sm.episode_active = true;
-        if ((now_ms - cry_sm.last_alert_ms) >= CRY_ALERT_COOLDOWN_MS) {
-            cry_sm.episode_active = false;
-            cry_sm.state          = CRY_STATE_IDLE;
-        }
-        break;
-
-    default:
-        cry_sm.state = CRY_STATE_IDLE;
-        break;
-    }
-}
-
-static inline bool    is_baby_cry_detected(void)  { return cry_sm.cry_detected; }
-static inline bool    is_cry_episode_active(void) { return cry_sm.episode_active; }
-static inline uint8_t get_cry_burst_count(void)   { return cry_sm.confirmed_burst_count; }
-
-static void reset_cry_detection(void)
-{
-    cry_sm.state                 = CRY_STATE_IDLE;
-    cry_sm.cry_detected          = false;
-    cry_sm.episode_active        = false;
-    cry_sm.confirmed_burst_count = 0;
-    cry_sm.burst_count_total     = 0;
-    cry_sm.burst_head            = 0;
-    memset(cry_sm.burst_end_times_ms, 0, sizeof(cry_sm.burst_end_times_ms));
-    printf("CRY: Detection reset\n");
-}
-
-void calibrate_baseline_dc(void)
-{
-    int32_t total = 0;
-    for (int i = 0; i < NUM_CAL_SAMPLES; i++) {
-        if (adc_read(adc_dev, &sequence) == 0) {
-            int32_t mv = sampleBuffer[0];
-            adc_raw_to_millivolts(adc_ref_internal(adc_dev), ADC_GAIN, ADC_RESOLUTION, &mv);
-            total += mv;
-        }
-        k_msleep(5);
-    }
-    baseline_dc = total / NUM_CAL_SAMPLES;
-    printf("Calibrated baseline DC: %d mV\n", baseline_dc);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -498,15 +363,15 @@ void calibrate_baseline_dc(void)
 // ─────────────────────────────────────────────────────────────────────────────
 int main(void)
 {
-    int err;
-    printf("Startup\n");
+    printf("Mic-Sense Audio Streaming (16 kHz ADPCM)\n");
     update_led_strip(0, 255, 255);
 
+    // Button / power GPIO
     k_work_init(&button_work, button_work_handler);
     k_timer_init(&button_timer, button_timer_expiry, NULL);
     update_led_state(BLE_STATE_IDLE);
 
-    if (!device_is_ready(pwr_En.port)) { printf("GPIO port not ready\n"); return 0; }
+    if (!device_is_ready(pwr_En.port)) { printf("GPIO not ready\n"); return 0; }
     gpio_pin_configure_dt(&pwr_En, GPIO_OUTPUT_ACTIVE);
     gpio_pin_set_dt(&pwr_En, 1);
 
@@ -516,170 +381,58 @@ int main(void)
     gpio_init_callback(&input_cb_data, input_pin_isr, BIT(pair_pin.pin));
     gpio_add_callback(pair_pin.port, &input_cb_data);
 
-    if (init_ble() == 0) printf("BLE Initialized successfully.\n");
-    else                  printf("BLE Initialization failed.\n");
+    // BLE
+    if (init_ble() == 0) printf("BLE initialized\n");
+    else                  printf("BLE init failed\n");
 
     advertising_active = false;
     update_led_strip(255, 0, 0);
 
-    if (!device_is_ready(adc_dev)) { printf("ADC Device not ready\n"); return 0; }
-
-    err = adc_channel_setup(adc_dev, &chl0_cfg);
-    if (err) { printf("ADC Setup failed: %d\n", err); return 0; }
-
-    err = adc_channel_setup(adc_dev, &battery_ch_cfg);
-    if (err) { printf("Battery ADC Setup failed: %d\n", err); return 0; }
-
-    biquad_init_bandpass(&bpf, (float)SAMPLE_RATE_HZ, BPF_FC_HZ, BPF_Q);
+    // Audio hardware pipeline (Timer2 + PPI + SAADC DMA)
     audio_init();
+    audio_pipeline_init();
 
-    printf("Calibrating microphone DC offset...\n");
-    calibrate_baseline_dc();
+    printf("Ready. Waiting for BLE stream command...\n");
 
-    while (1)
-    {
-        // ── Dedicated audio recording loop (cycle-accurate timing) ─────
-        if (audio_recording) {
-            printf("Audio: Recording at %d Hz...\n", SAMPLE_RATE_HZ);
-            uint32_t cycles_per_sample = sys_clock_hw_cycles_per_sec() / SAMPLE_RATE_HZ;
-            uint32_t next_cycle = k_cycle_get_32();
-
-            while (audio_recording && audio_write_index < AUDIO_BUFFER_SIZE) {
-                next_cycle += cycles_per_sample;
-
-                err = adc_read(adc_dev, &sequence);
-                if (err == 0) {
-                    int32_t mv_value = sampleBuffer[0];
-                    adc_raw_to_millivolts(adc_ref_internal(adc_dev),
-                                          ADC_GAIN, ADC_RESOLUTION, &mv_value);
-                    audio_buffer[audio_write_index++] = (int16_t)mv_value;
-                }
-
-                // Spin until exact next sample time
-                while ((int32_t)(next_cycle - k_cycle_get_32()) > 0) { }
+    // ─── Main loop: wait for DMA frames → ADPCM encode → BLE notify ────
+    while (1) {
+        // Not streaming: stop pipeline if running, sleep
+        if (!audio_stream_active || !my_connection) {
+            if (pipeline_running) {
+                stop_audio_pipeline();
             }
-            audio_recording = false;
-            audio_status = AUDIO_STATUS_IDLE;
-            printf("Audio: Recording done (%u samples)\n", audio_write_index);
+            k_msleep(100);
             continue;
         }
 
-        // ── Live audio streaming over BLE ────────────────────────────────
-        if (audio_stream_active && my_connection) {
-            uint16_t mtu = bt_gatt_get_mtu(my_connection);
-            if (mtu < 23) mtu = 23;
-            uint16_t max_payload = mtu - 3;     // ATT notification header
-            uint16_t frame_size = max_payload - 2; // 2-byte seq header
-            if (frame_size > 240) frame_size = 240;
+        // Start pipeline on demand
+        if (!pipeline_running) {
+            start_audio_pipeline();
+        }
 
-            uint8_t frame[244];
-            static uint16_t stream_seq = 0;
-            frame[0] = (uint8_t)(stream_seq & 0xFF);
-            frame[1] = (uint8_t)(stream_seq >> 8);
-            stream_seq++;
-
-            // Sample one frame of 8-bit audio using same timing as recording
-            uint32_t cycles_per_sample = sys_clock_hw_cycles_per_sec() / SAMPLE_RATE_HZ;
-            uint32_t next_cycle = k_cycle_get_32();
-
-            for (uint16_t i = 0; i < frame_size; i++) {
-                next_cycle += cycles_per_sample;
-                err = adc_read(adc_dev, &sequence);
-                if (err == 0) {
-                    int16_t raw = sampleBuffer[0];
-                    if (raw < 0) raw = 0;
-                    frame[2 + i] = (uint8_t)((raw >> 4) & 0xFF);
-                } else {
-                    frame[2 + i] = 128;
-                }
-                while ((int32_t)(next_cycle - k_cycle_get_32()) > 0) { }
-            }
-
-            bt_gatt_notify(my_connection, audio_data_attr, frame, frame_size + 2);
+        // Wait for next DMA-filled frame (20 ms cadence)
+        if (k_sem_take(&frame_sem, K_MSEC(50)) != 0) {
             continue;
         }
 
-        // ── Sample one frame ──────────────────────────────────────────────
-        int32_t sum_sq = 0;
-        for (int i = 0; i < FRAME_SAMPLES; i++) {
-            err = adc_read(adc_dev, &sequence);
-            if (err != 0) { printf("ADC read error %d\n", err); continue; }
-
-            int32_t mv_value = sampleBuffer[0];
-            adc_raw_to_millivolts(adc_ref_internal(adc_dev), ADC_GAIN, ADC_RESOLUTION, &mv_value);
-
-            float x  = (float)(mv_value - baseline_dc);
-
-            // DC-blocking high-pass filter
-            float y  = x - hpf_prev_x + HPF_R * hpf_prev_y;
-            hpf_prev_x = x;
-            hpf_prev_y = y;
-
-            // Band-pass filter (emphasises 800 Hz region)
-            float y_bp = biquad_process(&bpf, y);
-
-            // Clamp to avoid int32 overflow in accumulator
-            if (y_bp >  3000.0f) y_bp =  3000.0f;
-            if (y_bp < -3000.0f) y_bp = -3000.0f;
-            sum_sq += (int32_t)(y_bp * y_bp);
-
-            k_busy_wait(1000000 / SAMPLE_RATE_HZ);   // pacing for 8 kHz
-        }
-
-        // ── Compute dB SPL ────────────────────────────────────────────────
-        float rms = sqrtf((float)sum_sq / FRAME_SAMPLES);
-        if (rms < 1.0f) rms = 1.0f;   // avoid log10(0)
-
-        // DB_TOTAL_OFFSET = BPF gain compensation (25 dB) + calibration vs UT353 (+7 dB)
-        db          = 20.0f * log10f(rms) + DB_TOTAL_OFFSET;
-        db_filtered = SMOOTHING_ALPHA * db + (1.0f - SMOOTHING_ALPHA) * db_filtered;
-        db_int      = (int8_t)(db_filtered);
-
-        printf("Sound Level: %s (dB=%d)\n", get_sound_level_string(db_filtered), db_int);
-        k_msleep(25);
-
-        // ── Baby cry detection ────────────────────────────────────────────
-        uint32_t now_ms = k_uptime_get_32();
-        update_cry_detector_raw(db, now_ms);   // pass RAW db (unfiltered)
-
-        if (is_baby_cry_detected()) {
-            baby_cry_detected = 1;
-
-            if (my_connection) {
-                err = bt_gatt_notify(my_connection, baby_cry_attr,
-                                     &baby_cry_detected, sizeof(baby_cry_detected));
-                if (err) printf("Failed to notify baby cry (err %d)\n", err);
-                else     printf("Baby Cry Notification sent: %d\n", baby_cry_detected);}
-        } else if (!is_cry_episode_active()) {
-            // Reset baby cry flag when episode ends
-            baby_cry_detected = 0;
-        }
-
-        // ── Threshold alert ───────────────────────────────────────────────
-        if (db_filtered >= threshold_value) {
-            above_ms += FRAME_MS;
-            below_ms  = 0;
-            alertThreshold = 1;
-
-            if (my_connection) {
-                err = bt_gatt_notify(my_connection, alert_threshold_attr,
-                                     &alertThreshold, sizeof(alertThreshold));
-                if (err) printf("Failed to notify threshold (err %d)\n", err);
+        // First frame: calibrate DC bias, don't send
+        if (!dc_calibrated) {
+            int32_t sum = 0;
+            for (int i = 0; i < FRAME_SAMPLES; i++) {
+                sum += ready_buf[i];
             }
-        } else {
-            below_ms     += FRAME_MS;
-            above_ms      = 0;
-            alertThreshold = 0;
-            if (!notify_armed && below_ms >= RESET_HOLD_MS) notify_armed = 1;
+            dc_bias = (int16_t)(sum / FRAME_SAMPLES);
+            dc_calibrated = true;
+            printf("DC bias: %d raw (~%d mV)\n", dc_bias, (dc_bias * 3600) / 4096);
+            continue;
         }
 
-        // ── dB streaming ─────────────────────────────────────────────────
-        if (sound_streaming_enabled > 0 && my_connection) {
-            db_int = (int8_t)(db_filtered);
-            err = bt_gatt_notify(my_connection, getStreamService_attr, &db_int, sizeof(db_int));
-            if (err) printf("Failed to stream dB (err %d)\n", err);
-            else     printf("dB Notification sent: %d\n", db_int);
-        }
+        // ADPCM encode 320 samples → 164-byte packet
+        uint8_t pkt[ADPCM_PKT_SIZE];
+        adpcm_encode_frame(ready_buf, pkt);
+
+        // BLE notify
+        bt_gatt_notify(my_connection, audio_data_attr, pkt, ADPCM_PKT_SIZE);
     }
 
     return 0;

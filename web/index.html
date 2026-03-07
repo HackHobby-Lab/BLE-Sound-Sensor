@@ -168,7 +168,7 @@
     </div>
     <p id="liveStatus" style="margin-top:8px;font-size:0.85rem;color:var(--muted);">Not streaming</p>
     <p style="font-size:0.8rem;color:var(--muted);margin-top:4px;">
-      Real-time audio from device speaker. No duration limit.
+      16 kHz ADPCM audio over BLE. Hardware-timed sampling, no duration limit.
     </p>
   </div>
 
@@ -398,13 +398,15 @@ function onAudioData(event) {
   if (dv.byteLength < 3) return;
 
   if (liveStreaming) {
-    // Live stream mode: [uint16 seq] [uint8 audio data...]
-    const audioData = new Uint8Array(dv.buffer, dv.byteOffset + 2, dv.byteLength - 2);
-    queueLiveAudio(audioData);
+    // ADPCM packet: [i16 predicted][u8 step_idx][u8 rsvd][160 bytes ADPCM data]
+    if (dv.byteLength < 5) return;
+    const decoded = decodeADPCMPacket(dv);
+    queueLiveAudio(decoded);
     liveFrameCount++;
     if (liveFrameCount % 50 === 0) {
       document.getElementById('liveStatus').textContent =
-        'Streaming... (' + liveFrameCount + ' frames received)';
+        'Streaming... (' + liveFrameCount + ' frames, ' +
+        (liveFrameCount * 320 / 16000).toFixed(1) + 's)';
     }
     return;
   }
@@ -623,33 +625,65 @@ async function requestTransfer() {
   log('Audio transfer requested', 'warn');
 }
 
-// ── Live Audio Streaming ─────────────────────────────────────────────────────
+// ── Live Audio Streaming (IMA ADPCM @ 16 kHz) ───────────────────────────────
 let liveStreaming = false;
 let liveAudioCtx = null;
 let liveNextTime = 0;
 let liveFrameCount = 0;
-let liveDcOffset = 128;
-let liveDcSamples = 0;
-let liveDcSum = 0;
+const LIVE_RATE = 16000;
 
-function queueLiveAudio(uint8Samples) {
-  if (!liveAudioCtx) return;
+// IMA ADPCM tables (must match firmware exactly)
+const STEP_TABLE = [
+  7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,
+  50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,
+  230,253,279,307,337,371,408,449,494,544,598,658,724,796,
+  876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,
+  2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,
+  7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,
+  20350,22385,24623,27086,29794,32767
+];
+const IDX_ADJ = [-1,-1,-1,-1, 2, 4, 6, 8, -1,-1,-1,-1, 2, 4, 6, 8];
 
-  // Estimate DC offset from first ~2000 samples
-  if (liveDcSamples < 2000) {
-    for (let i = 0; i < uint8Samples.length && liveDcSamples < 2000; i++) {
-      liveDcSum += uint8Samples[i];
-      liveDcSamples++;
-    }
-    liveDcOffset = liveDcSum / liveDcSamples;
+function decodeADPCMPacket(dv) {
+  // Header: [i16 predicted][u8 step_idx][u8 rsvd][ADPCM nibbles...]
+  let predicted = dv.getInt16(0, true);
+  let index = dv.getUint8(2);
+  if (index > 88) index = 88;
+
+  const adpcmBytes = dv.byteLength - 4;
+  const numSamples = adpcmBytes * 2;
+  const out = new Float32Array(numSamples);
+
+  for (let i = 0; i < numSamples; i++) {
+    const byteVal = dv.getUint8(4 + (i >> 1));
+    const nibble = (i & 1) ? (byteVal >> 4) & 0x0F : byteVal & 0x0F;
+
+    const step = STEP_TABLE[index];
+    let delta = step >> 3;
+    if (nibble & 4) delta += step;
+    if (nibble & 2) delta += step >> 1;
+    if (nibble & 1) delta += step >> 2;
+    if (nibble & 8) delta = -delta;
+
+    predicted += delta;
+    if (predicted > 32767) predicted = 32767;
+    if (predicted < -32768) predicted = -32768;
+
+    let ni = index + IDX_ADJ[nibble];
+    if (ni < 0) ni = 0;
+    if (ni > 88) ni = 88;
+    index = ni;
+
+    out[i] = predicted / 32768.0;
   }
+  return out;
+}
 
-  const len = uint8Samples.length;
-  const buf = liveAudioCtx.createBuffer(1, len, 8000);
-  const ch = buf.getChannelData(0);
-  for (let i = 0; i < len; i++) {
-    ch[i] = (uint8Samples[i] - liveDcOffset) / 128.0;
-  }
+function queueLiveAudio(samples) {
+  if (!liveAudioCtx || samples.length === 0) return;
+
+  const buf = liveAudioCtx.createBuffer(1, samples.length, LIVE_RATE);
+  buf.getChannelData(0).set(samples);
 
   const src = liveAudioCtx.createBufferSource();
   src.buffer = buf;
@@ -657,10 +691,10 @@ function queueLiveAudio(uint8Samples) {
 
   const now = liveAudioCtx.currentTime;
   if (liveNextTime < now) {
-    liveNextTime = now + 0.08;  // 80ms initial buffer for jitter
+    liveNextTime = now + 0.06;  // 60ms jitter buffer
   }
   src.start(liveNextTime);
-  liveNextTime += len / 8000;
+  liveNextTime += samples.length / LIVE_RATE;
 }
 
 async function startLiveStream() {
@@ -668,9 +702,6 @@ async function startLiveStream() {
   liveNextTime = 0;
   liveFrameCount = 0;
   liveStreaming = true;
-  liveDcSamples = 0;
-  liveDcSum = 0;
-  liveDcOffset = 128;
 
   await sendAudioCmd(0x04);
   document.getElementById('btnLiveStart').disabled = true;
