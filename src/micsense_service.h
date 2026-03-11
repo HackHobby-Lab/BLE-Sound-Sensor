@@ -9,6 +9,33 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
+#include <zephyr/sys/printk.h>
+
+/* ──────────────────────────────────────────────────────────────
+ * Compile‑time feature switches
+ *
+ *  - USE_STATUS_LED          : enable RGB status LED
+ *  - USE_LOGGING             : enable runtime logging (printf-style)
+ *  - USE_LOW_TX_POWER        : reduce BLE TX power (e.g. -8 dBm)
+ *  - USE_LOW_RADIO_DUTY_CYCLE: longer conn interval/latency
+ *
+ * Define via compiler flags (e.g. -DUSE_LOGGING) or uncomment below.
+ * LOG_PRINT(...) is the single macro for all logging: same format as
+ * printf()/printk(); when USE_LOGGING is undefined it compiles to no-op.
+ * ──────────────────────────────────────────────────────────── */
+
+/* Uncomment to enable (or pass -DUSE_LOGGING etc. from build): */
+// #define USE_LOGGING
+// #define USE_STATUS_LED
+#define USE_LOW_TX_POWER
+#define USE_LOW_RADIO_DUTY_CYCLE
+
+
+#ifdef USE_LOGGING
+#define LOG_PRINT(...) printk(__VA_ARGS__)
+#else
+#define LOG_PRINT(...) do { } while (0)
+#endif
 
 // GET_THRESHOLD_SERVICE=4fafc202-1fb5-459e-8fcc-c5c9c331914c
 // GET_THRESHOLD_CHARACTERISTIC=beb5483f-36e1-4688-b7f5-ea07361b26a9
@@ -65,20 +92,23 @@ extern const struct bt_gatt_attr *getStreamService_attr;
 extern const struct bt_gatt_attr *baby_cry_attr;
 extern uint8_t baby_cry_detected;
 // extern volatile bool ble_ready = false;
-// void update_led_strip(uint8_t r, uint8_t g, uint8_t b);
-// void update_led(uint8_t index, uint8_t r, uint8_t g, uint8_t b);
 
-/* Initialize the MICSENSE BLE service */
-int MICSENSE_service_init(void);
-
-/* Initialize BLE stack */
-int init_ble(void);
 enum ble_state {
     BLE_STATE_IDLE,
     BLE_STATE_ADVERTISING,
     BLE_STATE_CONNECTING,
     BLE_STATE_CONNECTED
 };
+
+/* LED helpers (no-op when USE_STATUS_LED is not defined; implemented in main.c) */
+void update_led_strip(uint8_t r, uint8_t g, uint8_t b);
+void update_led_state(enum ble_state state);
+
+/* Initialize the MICSENSE BLE service */
+int MICSENSE_service_init(void);
+
+/* Initialize BLE stack */
+int init_ble(void);
 
 /* BLE Connection Callbacks */
 void on_cccd_changed(const struct bt_gatt_attr *attr, uint16_t value);

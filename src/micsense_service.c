@@ -6,10 +6,18 @@
 
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/hci.h>
+#include <zephyr/bluetooth/hci_vs.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
+#include <zephyr/net/buf.h>
+#include <zephyr/sys/byteorder.h>
 #include "micsense_service.h"
+
+#ifdef USE_LOW_TX_POWER
+/* TX power in dBm when USE_LOW_TX_POWER is defined (e.g. -8 for same-room range) */
+#define BLE_TX_POWER_LOW_DBM  (-8)
+#endif
 /* UUIDs Definitions */
 // / 2. UUID DECLARATIONS (for GATT)
 #define BT_UUID_GET_THRESHOLD_SERVICE           BT_UUID_DECLARE_128(BT_UUID_GET_THRESHOLD_SERVICE_VAL)
@@ -51,8 +59,8 @@ uint8_t baby_cry_detected = 0;           // Baby cry detection status (0 or 1)
 
 int MICSENSE_service_init(void)
 {
-    
-}// Notify the client after a successful write operation
+    return 0;
+}
 
 
 static ssize_t on_receive(struct bt_conn *conn,
@@ -67,8 +75,8 @@ static ssize_t on_receive(struct bt_conn *conn,
     // Safely copy the received buffer into the integer
     memcpy(&received_value, buf, sizeof(uint8_t));
     threshold_value = received_value;
-    printk("Received integer: %d\n", received_value);
-    printk("------Value stored in threshold variable: %d\n", threshold_value);
+    LOG_PRINT("Received integer: %d\n", received_value);
+    LOG_PRINT("------Value stored in threshold variable: %d\n", threshold_value);
     return len;  // Return the length of data written
 }
 
@@ -84,7 +92,7 @@ uint8_t received_value;
 // Safely copy the received buffer into the integer
 memcpy(&received_value, buf, sizeof(uint8_t));
 sound_streaming_enabled = received_value;
-printk("Received Set Stream: %d\n", received_value);
+LOG_PRINT("Received Set Stream: %d\n", received_value);
 return len;  // Return the length of data written
 }
 
@@ -95,7 +103,7 @@ ssize_t on_getThreshold(struct bt_conn *conn,
     uint16_t len,
     uint16_t offset)
 {
-printk("In On get Threshold function\n");
+LOG_PRINT("In On get Threshold function\n");
 return bt_gatt_attr_read(conn, attr, buf,len, offset, &threshold_value, sizeof(threshold_value)); // Handle reading logic here if needed
 };
 
@@ -105,20 +113,20 @@ void on_cccd_changed(const struct bt_gatt_attr *attr, uint16_t value)
     switch (value)
     {
     case BT_GATT_CCC_NOTIFY:
-        printk("Notifications enabled\n");
+        LOG_PRINT("Notifications enabled\n");
         notify_enabled = true;
-        printk("Notifications %s\n", notify_enabled ? "enabled" : "disabled");
+        LOG_PRINT("Notifications %s\n", notify_enabled ? "enabled" : "disabled");
         break;
     case BT_GATT_CCC_INDICATE:
         // Handle indications if necessary
         break;
     case 0:
-        printk("Notifications disabled\n");
+        LOG_PRINT("Notifications disabled\n");
         notify_enabled = false;
-        printk("Notifications %s\n", notify_enabled ? "enabled" : "disabled");
+        LOG_PRINT("Notifications %s\n", notify_enabled ? "enabled" : "disabled");
         break;
     default:
-        printk("Error, CCCD has been set to an invalid value\n");
+        LOG_PRINT("Error, CCCD has been set to an invalid value\n");
     }
 }
 
@@ -236,6 +244,45 @@ void setup_alert_service(void)
     baby_cry_attr = &babyCrySrvc.attrs[1];
 }
 
+#ifdef USE_LOW_TX_POWER
+/**
+ * Set BLE TX power via HCI vendor command (Nordic/Zephyr).
+ * handle_type: BT_HCI_VS_LL_HANDLE_TYPE_ADV, _SCAN, or _CONN
+ * handle: 0 for default advertising set; 0 for first connection when type is CONN
+ */
+static void set_ble_tx_power_dbm(uint8_t handle_type, uint16_t handle, int8_t power_dbm)
+{
+    struct net_buf *buf;
+    struct net_buf *rsp = NULL;
+    struct bt_hci_cp_vs_write_tx_power_level *cp;
+    struct bt_hci_rp_vs_write_tx_power_level *rp;
+    int err;
+
+    buf = bt_hci_cmd_create(BT_HCI_OP_VS_WRITE_TX_POWER_LEVEL, sizeof(*cp));
+    if (!buf) {
+        LOG_PRINT("TX power: cmd buf failed\n");
+        return;
+    }
+    cp = net_buf_add(buf, sizeof(*cp));
+    cp->handle_type = handle_type;
+    cp->handle = sys_cpu_to_le16(handle);
+    cp->tx_power_level = power_dbm;
+
+    err = bt_hci_cmd_send_sync(BT_HCI_OP_VS_WRITE_TX_POWER_LEVEL, buf, &rsp);
+    if (err) {
+        LOG_PRINT("TX power set failed (err %d)\n", err);
+        return;
+    }
+    rp = (void *)rsp->data;
+    if (rp->status) {
+        LOG_PRINT("TX power HCI status %u\n", rp->status);
+    } else {
+        LOG_PRINT("TX power set to %d dBm (type %u)\n", power_dbm, handle_type);
+    }
+    net_buf_unref(rsp);
+}
+#endif
+
 
 
 
@@ -246,34 +293,48 @@ static void connected(struct bt_conn *conn, uint8_t err)
     my_connection = conn;
 
     if (err) {
-        printf("Connection failed (err %u)\n", err);
+        LOG_PRINT("Connection failed (err %u)\n", err);
         return;
-    } else if (bt_conn_get_info(conn, &info)) {
-        printf("Could not parse info\n");
-    } else {
+    }
+    else if (bt_conn_get_info(conn, &info)) {
+        LOG_PRINT("Could not parse info\n");
+    }
+    else {
         bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-        printf("Connection established! Connected to: %s Role: %u Connection interval: %u Slave latency: %u Connection supervisory timeout: %u\n",
-               addr, info.role, info.le.interval, info.le.latency, info.le.timeout);
+        LOG_PRINT("Connection established! Connected to: %s Role: %u Connection interval: %u Slave latency: %u Connection supervisory timeout: %u\n",
+                  addr, info.role, info.le.interval, info.le.latency, info.le.timeout);
 
         setup_alert_service();
         update_led_state(BLE_STATE_CONNECTED);
 
-        /* 🔑 Request safe connection parameters */
+#ifdef USE_LOW_RADIO_DUTY_CYCLE
+        /* Longer interval + latency → lower radio duty cycle */
+        const struct bt_le_conn_param *param = BT_LE_CONN_PARAM(80, 160, 4, 400);
+#else
+        /* Original, lower-latency settings */
         const struct bt_le_conn_param *param = BT_LE_CONN_PARAM(24, 40, 0, 400);
+#endif
 
-        int rc = bt_conn_le_param_update(conn, &param);
+        int rc = bt_conn_le_param_update(conn, param);
         if (rc) {
-            printf("conn param update failed (%d)\n", rc);
+            LOG_PRINT("conn param update failed (%d)\n", rc);
         }
+
+#ifdef USE_LOW_TX_POWER
+        /* Set TX power for this connection (handle 0 = first connection) */
+        set_ble_tx_power_dbm(BT_HCI_VS_LL_HANDLE_TYPE_CONN, 0, BLE_TX_POWER_LOW_DBM);
+#endif
     }
 }
 
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-    printf("Disconnected (reason %u)\n", reason);
+    LOG_PRINT("Disconnected (reason %u)\n", reason);
     my_connection = NULL;
-     update_led_state(BLE_STATE_ADVERTISING);
+#ifdef USE_STATUS_LED
+    update_led_state(BLE_STATE_ADVERTISING);
+#endif
 }
 
 static struct bt_conn_cb conn_callbacks = {
@@ -284,21 +345,26 @@ void bt_ready(int err)
 {
     if (err)
     {
-        printf("BT_ENABLE RETURN %d\n", err);
+        LOG_PRINT("BT_ENABLE RETURN %d\n", err);
     }
-    printf("BT ENABLE\n");
+    LOG_PRINT("BT ENABLE\n");
     ble_ready = true;
     bt_conn_cb_register(&conn_callbacks);
+
+#ifdef USE_LOW_TX_POWER
+    /* Set advertising TX power to low (e.g. -8 dBm) for lower current */
+    set_ble_tx_power_dbm(BT_HCI_VS_LL_HANDLE_TYPE_ADV, 0, BLE_TX_POWER_LOW_DBM);
+#endif
 }
 
 int init_ble(void)
 {
-    printf("Initializing BLE\n");
+    LOG_PRINT("Initializing BLE\n");
     int err;
     err = bt_enable(bt_ready);
     if (err)
     {
-        printf("Bt Enable failed with error code (code %d)\n", err);
+        LOG_PRINT("Bt Enable failed with error code (code %d)\n", err);
         return err;
     }
     return 0;

@@ -3,7 +3,6 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/adc.h>
 #include <zephyr/kernel.h>
-#include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
@@ -21,6 +20,17 @@
 #define M_PI 3.14159265358979323846f
 #endif
 
+
+/* ──────────────────────────────────────────────────────────────
+ * Status LED control (WS2812)
+ *
+ * If USE_STATUS_LED is defined at compile time, the WS2812 status
+ * LED will be driven normally. If it is NOT defined, all LED calls
+ * become no‑ops so you can measure current without LED impact.
+ * ──────────────────────────────────────────────────────────── */
+
+#ifdef USE_STATUS_LED
+
 #define STRIP_NODE DT_ALIAS(led_strip)
 #define STRIP_NUM_PIXELS DT_PROP(STRIP_NODE, chain_length)
 #define DELAY_TIME K_MSEC(5)
@@ -34,8 +44,24 @@ static enum ble_state current_ble_state = BLE_STATE_IDLE;
 static struct k_timer led_blink_timer;
 static bool led_on = false;
 
-struct led_rgb pixels[STRIP_NUM_PIXELS];
-const struct device *strip = DEVICE_DT_GET(STRIP_NODE);
+static struct led_rgb pixels[STRIP_NUM_PIXELS];
+static const struct device *strip = DEVICE_DT_GET(STRIP_NODE);
+
+#else /* !USE_STATUS_LED */
+
+void update_led_strip(uint8_t r, uint8_t g, uint8_t b)
+{
+    ARG_UNUSED(r);
+    ARG_UNUSED(g);
+    ARG_UNUSED(b);
+}
+
+void update_led_state(enum ble_state state)
+{
+    ARG_UNUSED(state);
+}
+
+#endif /* USE_STATUS_LED */
 
 #define EN_PIN_NODE DT_NODELABEL(user_output_pin)
 static const struct gpio_dt_spec pwr_En = GPIO_DT_SPEC_GET(EN_PIN_NODE, gpios);
@@ -253,15 +279,15 @@ static baby_cry_sm_t cry_sm = {
 static void button_work_handler(struct k_work *work)
 {
     if (k_timer_status_get(&button_timer) > 0) {
-        // Timer expired before release → long press
-        printf("Long press detected!\n");
+        /* Timer expired before release → long press */
+        LOG_PRINT("Long press detected!\n");
         gpio_pin_set_dt(&pwr_En, 0);
         while (1) {
             k_sleep(K_FOREVER);
         }
     } else {
-        // Released before timer expired → short press
-        printf("Short press detected. Toggling BLE advertising...\n");
+        /* Released before timer expired → short press */
+        LOG_PRINT("Short press detected. Toggling BLE advertising...\n");
         int err;
         if (advertising_active) {
             err = bt_le_adv_stop();
@@ -300,17 +326,17 @@ void input_pin_isr(const struct device *dev, struct gpio_callback *cb, uint32_t 
     }
 }
 
+#ifdef USE_STATUS_LED
 void update_led_strip(uint8_t r, uint8_t g, uint8_t b)
 {
-    // Set the RGB values for all the pixels
-    for (int i = 0; i < STRIP_NUM_PIXELS; i++)
-    {
+    /* Set the RGB values for all the pixels */
+    for (int i = 0; i < STRIP_NUM_PIXELS; i++) {
         pixels[i].r = r;
         pixels[i].g = g;
         pixels[i].b = b;
     }
 
-    // Update the LED strip
+    /* Update the LED strip */
     led_strip_update_rgb(strip, pixels, STRIP_NUM_PIXELS);
 }
 
@@ -318,27 +344,25 @@ void update_led_state(enum ble_state state)
 {
     current_ble_state = state;
 
-    switch (state)
-    {
+    switch (state) {
     case BLE_STATE_ADVERTISING:
-         update_led_strip(255, 255, 0); // Yellow
+        update_led_strip(16, 16, 0);   /* dim yellow */
         break;
 
     case BLE_STATE_CONNECTING:
-      update_led_strip(255, 165, 0); // Orange
+        update_led_strip(16, 8, 0);    /* dim orange */
         break;
 
     case BLE_STATE_CONNECTED:
-        // k_timer_stop(&led_blink_timer);
-        update_led_strip(0, 255, 0); // Solid green
+        update_led_strip(0, 16, 0);    /* dim green */
         break;
 
     default:
-        // k_timer_stop(&led_blink_timer);
-        update_led_strip(255, 0, 0); // Solid red (idle/error)
+        update_led_strip(16, 0, 0);    /* dim red (idle/error) */
         break;
     }
 }
+#endif /* USE_STATUS_LED */
 
 static void biquad_init_bandpass(biquad_t *s, float fs, float f0, float q)
 {
@@ -404,7 +428,7 @@ void update_cry_detector_raw(float raw_db, uint32_t now_ms)
             cry_sm.burst_start_ms    = now_ms;
             cry_sm.burst_peak_raw_db = raw_db;
             cry_sm.state             = CRY_STATE_BURST_ACTIVE;
-            printf("CRY: [BURST START] raw=%.1f dB, lift=%.1f dB\n", raw_db, lift);
+            LOG_PRINT("CRY: [BURST START] raw=%.1f dB, lift=%.1f dB\n", raw_db, lift);
         }
         break;
 
@@ -415,20 +439,20 @@ void update_cry_detector_raw(float raw_db, uint32_t now_ms)
 
             if (raw_db < CRY_RAW_EXIT_DB) {
                 if (dur < CRY_BURST_MIN_MS) {
-                    printf("CRY: [REJECT SHORT] %u ms, peak=%.1f dB\n",
-                           dur, cry_sm.burst_peak_raw_db);
+                    LOG_PRINT("CRY: [REJECT SHORT] %u ms, peak=%.1f dB\n",
+                              dur, cry_sm.burst_peak_raw_db);
                     cry_sm.state = CRY_STATE_IDLE;
                     break;
                 }
                 if (dur > CRY_BURST_MAX_MS) {
-                    printf("CRY: [REJECT LONG] %u ms\n", dur);
+                    LOG_PRINT("CRY: [REJECT LONG] %u ms\n", dur);
                     cry_sm.state = CRY_STATE_IDLE;
                     break;
                 }
                 record_burst(now_ms);
                 uint8_t recent = count_recent_bursts(now_ms);
-                printf("CRY: [VALID BURST] %u ms, peak=%.1f dB, bursts=%u/%u\n",
-                       dur, cry_sm.burst_peak_raw_db, recent, CRY_BURST_COUNT_REQUIRED);
+                // printf("CRY: [VALID BURST] %u ms, peak=%.1f dB, bursts=%u/%u\n",
+                //        dur, cry_sm.burst_peak_raw_db, recent, CRY_BURST_COUNT_REQUIRED);
                 cry_sm.state = CRY_STATE_IDLE;
 
                 if (recent >= CRY_BURST_COUNT_REQUIRED) {
@@ -439,11 +463,11 @@ void update_cry_detector_raw(float raw_db, uint32_t now_ms)
                         cry_sm.confirmed_burst_count = recent;
                         cry_sm.last_alert_ms         = now_ms;
                         cry_sm.state                 = CRY_STATE_CONFIRMED;
-                        printf("CRY: *** BABY CRY CONFIRMED *** %u bursts\n", recent);
+                        LOG_PRINT("CRY: *** BABY CRY CONFIRMED *** %u bursts\n", recent);
                     }
                 }
             } else if (dur > CRY_BURST_MAX_MS) {
-                printf("CRY: [REJECT LONG - ongoing] %u ms\n", dur);
+                LOG_PRINT("CRY: [REJECT LONG - ongoing] %u ms\n", dur);
                 cry_sm.state = CRY_STATE_IDLE;
             }
         }
@@ -476,7 +500,7 @@ static void reset_cry_detection(void)
     cry_sm.burst_count_total     = 0;
     cry_sm.burst_head            = 0;
     memset(cry_sm.burst_end_times_ms, 0, sizeof(cry_sm.burst_end_times_ms));
-    printf("CRY: Detection reset\n");
+    LOG_PRINT("CRY: Detection reset\n");
 }
 
 void calibrate_baseline_dc(void)
@@ -491,7 +515,7 @@ void calibrate_baseline_dc(void)
         k_msleep(5);
     }
     baseline_dc = total / NUM_CAL_SAMPLES;
-    printf("Calibrated baseline DC: %d mV\n", baseline_dc);
+    LOG_PRINT("Calibrated baseline DC: %d mV\n", baseline_dc);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -500,14 +524,17 @@ void calibrate_baseline_dc(void)
 int main(void)
 {
     int err;
-    printf("Startup\n");
-    update_led_strip(0, 255, 255);
+    LOG_PRINT("Startup\n");
+    update_led_strip(0, 16, 16);
 
     k_work_init(&button_work, button_work_handler);
     k_timer_init(&button_timer, button_timer_expiry, NULL);
     update_led_state(BLE_STATE_IDLE);
 
-    if (!device_is_ready(pwr_En.port)) { printf("GPIO port not ready\n"); return 0; }
+    if (!device_is_ready(pwr_En.port)) { 
+        LOG_PRINT("GPIO port not ready\n"); 
+        return 0; 
+    }
     gpio_pin_configure_dt(&pwr_En, GPIO_OUTPUT_ACTIVE);
     gpio_pin_set_dt(&pwr_En, 1);
 
@@ -517,23 +544,31 @@ int main(void)
     gpio_init_callback(&input_cb_data, input_pin_isr, BIT(pair_pin.pin));
     gpio_add_callback(pair_pin.port, &input_cb_data);
 
-    if (init_ble() == 0) printf("BLE Initialized successfully.\n");
-    else                  printf("BLE Initialization failed.\n");
+    init_ble();
 
     advertising_active = false;
-    update_led_strip(255, 0, 0);
+    update_led_strip(16, 0, 0);
 
-    if (!device_is_ready(adc_dev)) { printf("ADC Device not ready\n"); return 0; }
+    if (!device_is_ready(adc_dev)) { 
+        LOG_PRINT("ADC Device not ready\n"); 
+        return 0; 
+    }
 
     err = adc_channel_setup(adc_dev, &chl0_cfg);
-    if (err) { printf("ADC Setup failed: %d\n", err); return 0; }
+    if (err) { 
+        LOG_PRINT("ADC Setup failed: %d\n", err); 
+        return 0; 
+    }
 
     err = adc_channel_setup(adc_dev, &battery_ch_cfg);
-    if (err) { printf("Battery ADC Setup failed: %d\n", err); return 0; }
+    if (err) { 
+        LOG_PRINT("Battery ADC Setup failed: %d\n", err); 
+        return 0; 
+    }
 
     biquad_init_bandpass(&bpf, (float)SAMPLE_RATE_HZ, BPF_FC_HZ, BPF_Q);
 
-    printf("Calibrating microphone DC offset...\n");
+    LOG_PRINT("Calibrating microphone DC offset...\n");
     calibrate_baseline_dc();
 
     while (1)
@@ -542,7 +577,10 @@ int main(void)
         int32_t sum_sq = 0;
         for (int i = 0; i < FRAME_SAMPLES; i++) {
             err = adc_read(adc_dev, &sequence);
-            if (err != 0) { printf("ADC read error %d\n", err); continue; }
+            if (err != 0) { 
+                LOG_PRINT("ADC read error %d\n", err); 
+                continue; 
+            }
 
             int32_t mv_value = sampleBuffer[0];
             adc_raw_to_millivolts(adc_ref_internal(adc_dev), ADC_GAIN, ADC_RESOLUTION, &mv_value);
@@ -574,7 +612,7 @@ int main(void)
         db_filtered = SMOOTHING_ALPHA * db + (1.0f - SMOOTHING_ALPHA) * db_filtered;
         db_int      = (int8_t)(db_filtered);
 
-        printf("Sound Level: %s (dB=%d)\n", get_sound_level_string(db_filtered), db_int);
+        LOG_PRINT("Sound Level: %s (dB=%d)\n", get_sound_level_string(db_filtered), db_int);
         k_msleep(25);
 
         // ── Baby cry detection ────────────────────────────────────────────
@@ -587,8 +625,9 @@ int main(void)
             if (my_connection) {
                 err = bt_gatt_notify(my_connection, baby_cry_attr,
                                      &baby_cry_detected, sizeof(baby_cry_detected));
-                if (err) printf("Failed to notify baby cry (err %d)\n", err);
-                else     printf("Baby Cry Notification sent: %d\n", baby_cry_detected);}
+                if (err) { LOG_PRINT("Failed to notify baby cry (err %d)\n", err); }
+                else     { LOG_PRINT("Baby Cry Notification sent: %d\n", baby_cry_detected); }
+                }
         } else if (!is_cry_episode_active()) {
             // Reset baby cry flag when episode ends
             baby_cry_detected = 0;
@@ -603,7 +642,7 @@ int main(void)
             if (my_connection) {
                 err = bt_gatt_notify(my_connection, alert_threshold_attr,
                                      &alertThreshold, sizeof(alertThreshold));
-                if (err) printf("Failed to notify threshold (err %d)\n", err);
+                // if (err) printf("Failed to notify threshold (err %d)\n", err);
             }
         } else {
             below_ms     += FRAME_MS;
@@ -616,8 +655,8 @@ int main(void)
         if (sound_streaming_enabled > 0 && my_connection) {
             db_int = (int8_t)(db_filtered);
             err = bt_gatt_notify(my_connection, getStreamService_attr, &db_int, sizeof(db_int));
-            if (err) printf("Failed to stream dB (err %d)\n", err);
-            else     printf("dB Notification sent: %d\n", db_int);
+            if (err) { LOG_PRINT("Failed to stream dB (err %d)\n", err); }
+            else     { LOG_PRINT("dB Notification sent: %d\n", db_int); }
         }
     }
 
