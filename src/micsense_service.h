@@ -18,6 +18,7 @@
  *  - USE_LOGGING             : enable runtime logging (printf-style)
  *  - USE_LOW_TX_POWER        : reduce BLE TX power (e.g. -8 dBm)
  *  - USE_LOW_RADIO_DUTY_CYCLE: longer conn interval/latency
+ *  - USE_BLE                  : enable BLE stack (advertising, notifications)
  *
  * Define via compiler flags (e.g. -DUSE_LOGGING) or uncomment below.
  * LOG_PRINT(...) is the single macro for all logging: same format as
@@ -27,8 +28,9 @@
 /* Uncomment to enable (or pass -DUSE_LOGGING etc. from build): */
 // #define USE_LOGGING
 // #define USE_STATUS_LED
-#define USE_LOW_TX_POWER
-#define USE_LOW_RADIO_DUTY_CYCLE
+// #define USE_LOW_TX_POWER
+// #define USE_LOW_RADIO_DUTY_CYCLE
+#define USE_BLE
 
 
 #ifdef USE_LOGGING

@@ -132,10 +132,12 @@ struct adc_sequence battery_sequence = {
     .resolution  = ADC_RESOLUTION
 };
 
+#ifdef USE_BLE
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
     BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_SET_THRESHOLD_SERVICE_VAL),
 };
+#endif
 
 static struct k_timer button_timer;
 static bool long_press_detected = false;
@@ -287,7 +289,10 @@ static void button_work_handler(struct k_work *work)
         }
     } else {
         /* Released before timer expired → short press */
-        LOG_PRINT("Short press detected. Toggling BLE advertising...\n");
+        LOG_PRINT("Short press detected.\n");
+
+#ifdef USE_BLE
+        LOG_PRINT("Toggling BLE advertising...\n");
         int err;
         if (advertising_active) {
             err = bt_le_adv_stop();
@@ -302,6 +307,10 @@ static void button_work_handler(struct k_work *work)
                 update_led_state(BLE_STATE_ADVERTISING);
             }
         }
+#else
+        /* BLE disabled: no advertising */
+        ARG_UNUSED(advertising_active);
+#endif
     }
 
     k_timer_stop(&button_timer); // cleanup
@@ -544,7 +553,9 @@ int main(void)
     gpio_init_callback(&input_cb_data, input_pin_isr, BIT(pair_pin.pin));
     gpio_add_callback(pair_pin.port, &input_cb_data);
 
+#ifdef USE_BLE
     init_ble();
+#endif
 
     advertising_active = false;
     update_led_strip(16, 0, 0);
@@ -621,13 +632,15 @@ int main(void)
 
         if (is_baby_cry_detected()) {
             baby_cry_detected = 1;
-            
+
+#ifdef USE_BLE
             if (my_connection) {
                 err = bt_gatt_notify(my_connection, baby_cry_attr,
                                      &baby_cry_detected, sizeof(baby_cry_detected));
                 if (err) { LOG_PRINT("Failed to notify baby cry (err %d)\n", err); }
                 else     { LOG_PRINT("Baby Cry Notification sent: %d\n", baby_cry_detected); }
-                }
+            }
+#endif
         } else if (!is_cry_episode_active()) {
             // Reset baby cry flag when episode ends
             baby_cry_detected = 0;
@@ -639,11 +652,13 @@ int main(void)
             below_ms  = 0;
             alertThreshold = 1;
 
+#ifdef USE_BLE
             if (my_connection) {
                 err = bt_gatt_notify(my_connection, alert_threshold_attr,
                                      &alertThreshold, sizeof(alertThreshold));
                 // if (err) printf("Failed to notify threshold (err %d)\n", err);
             }
+#endif
         } else {
             below_ms     += FRAME_MS;
             above_ms      = 0;
@@ -652,12 +667,14 @@ int main(void)
         }
 
         // ── dB streaming ─────────────────────────────────────────────────
+#ifdef USE_BLE
         if (sound_streaming_enabled > 0 && my_connection) {
             db_int = (int8_t)(db_filtered);
             err = bt_gatt_notify(my_connection, getStreamService_attr, &db_int, sizeof(db_int));
             if (err) { LOG_PRINT("Failed to stream dB (err %d)\n", err); }
             else     { LOG_PRINT("dB Notification sent: %d\n", db_int); }
         }
+#endif
     }
 
     return 0;
