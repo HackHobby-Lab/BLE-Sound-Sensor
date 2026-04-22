@@ -1,0 +1,85 @@
+
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/adc.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
+#include <zephyr/sys/util.h>
+
+#define SLEEP_TIME_MS 100
+
+#define ADC_NODE DT_NODELABEL(adc)
+static const struct device *adc_dev = DEVICE_DT_GET(ADC_NODE);
+
+#define ADC_RESOLUTION 10
+#define ADC_CHANNEL 0
+#define ADC_PORT SAADC_CH_PSELP_PSELP_AnalogInput0 // AIN0
+#define ADC_REFERENCE ADC_REF_INTERNAL             // 0.6V
+#define ADC_GAIN ADC_GAIN_1_5                      // ADC_REFERENCE * 5
+
+struct adc_channel_cfg chl0_cfg = {
+    .gain = ADC_GAIN,
+    .reference = ADC_REFERENCE,
+    .acquisition_time = ADC_ACQ_TIME_DEFAULT,
+    .channel_id = ADC_CHANNEL,
+#ifdef CONFIG_ADC_NRFX_SAADC
+    .input_positive = ADC_PORT
+#endif
+};
+
+int16_t sampleBuffer[1];
+
+struct adc_sequence sequence = {
+    .channels = BIT(ADC_CHANNEL),
+    .buffer = sampleBuffer,
+    .buffer_size = sizeof(sampleBuffer),
+    .resolution = ADC_RESOLUTION};
+
+int main(void)
+{
+    int err;
+    if (!device_is_ready(adc_dev))
+    {
+        printf("ADC Device not read\n");
+        return;
+    }
+
+    err = adc_channel_setup(adc_dev, &chl0_cfg);
+    if (err != 0)
+    {
+        printf("ADC Setup failedwith error %d.\n", err);
+        return;
+    }
+
+    while (1)
+    {
+        err = adc_read(adc_dev, &sequence);
+        if (err != 0)
+        {
+            printf("ADC reading failed with error %d.\n", err);
+            return 0;
+        }
+
+        int32_t mv_value = sampleBuffer[0];
+        // Convert raw ADC to millivolts
+        int32_t adc_vref = adc_ref_internal(adc_dev);
+        adc_raw_to_millivolts(adc_vref, ADC_GAIN, ADC_RESOLUTION, &mv_value);
+
+        // Remove fixed DC bias (~1650mV if Vcc = 3.3V)
+        int32_t ac_component = mv_value - 1500; // Centered around 0
+
+        // Take absolute value (positive only)
+        if (ac_component < 0)
+            ac_component = -ac_component;
+
+        // Now do dB calculation
+        if (ac_component == 0)
+            ac_component = 1; // avoid log10(0)
+
+        float db = 20.0f * log10f((float)ac_component / 1.0f);
+
+        printf("Sound Level: %.2f dB\n", db);
+
+        k_msleep(SLEEP_TIME_MS);
+    }
+}

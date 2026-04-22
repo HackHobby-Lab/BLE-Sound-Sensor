@@ -1,0 +1,12 @@
+{
+    "files.associations": {
+        "uuid.h": "c",
+        "bluetooth.h": "c",
+        "conn.h": "c",
+        "soc.h": "c",
+        "gatt.h": "c",
+        "micsense_service.h": "c",
+        "devicetree.h": "c"
+    },
+    "idf.currentSetup": "C:\\esp\\v5.5.3\\esp-idf"
+}
