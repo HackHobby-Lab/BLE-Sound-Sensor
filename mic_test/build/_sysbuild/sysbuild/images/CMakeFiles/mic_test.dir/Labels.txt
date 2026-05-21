@@ -1,0 +1,13 @@
+# Target labels
+ mic_test
+# Source files and their labels
+D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/CMakeFiles/mic_test
+D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/CMakeFiles/mic_test.rule
+D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/CMakeFiles/mic_test-complete.rule
+D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-build.rule
+D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-configure.rule
+D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-download.rule
+D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-install.rule
+D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-mkdir.rule
+D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-patch.rule
+D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-update.rule

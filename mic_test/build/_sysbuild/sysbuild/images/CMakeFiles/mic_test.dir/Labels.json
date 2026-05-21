@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/CMakeFiles/mic_test"
+		},
+		{
+			"file" : "D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/CMakeFiles/mic_test.rule"
+		},
+		{
+			"file" : "D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/CMakeFiles/mic_test-complete.rule"
+		},
+		{
+			"file" : "D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-build.rule"
+		},
+		{
+			"file" : "D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-configure.rule"
+		},
+		{
+			"file" : "D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-download.rule"
+		},
+		{
+			"file" : "D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-install.rule"
+		},
+		{
+			"file" : "D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-mkdir.rule"
+		},
+		{
+			"file" : "D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-patch.rule"
+		},
+		{
+			"file" : "D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"mic_test"
+		],
+		"name" : "mic_test"
+	}
+}
