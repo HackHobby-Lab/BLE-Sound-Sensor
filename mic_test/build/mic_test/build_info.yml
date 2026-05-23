@@ -1,0 +1,57 @@
+cmake:
+  application:
+    configuration-dir: 'D:/study/Job_two_projects/BLE_SENSOR/mic_test'
+    source-dir: 'D:/study/Job_two_projects/BLE_SENSOR/mic_test'
+  board:
+    name: 'nrf52833dk'
+    path:
+     - 'C:/ncs/v3.2.4/zephyr/boards/nordic/nrf52833dk'
+    qualifiers: 'nrf52833'
+    revision: ''
+  devicetree:
+    bindings-dirs:
+     - 'C:/ncs/v3.2.4/nrf/dts/bindings'
+     - 'C:/ncs/v3.2.4/zephyr/dts/bindings'
+    files:
+     - 'C:/ncs/v3.2.4/zephyr/boards/nordic/nrf52833dk/nrf52833dk_nrf52833.dts'
+     - 'D:/study/Job_two_projects/BLE_SENSOR/mic_test/app.overlay'
+    include-dirs:
+     - 'C:/ncs/v3.2.4/nrf/include'
+     - 'C:/ncs/v3.2.4/nrf/dts/common'
+     - 'C:/ncs/v3.2.4/nrf/dts/riscv'
+     - 'C:/ncs/v3.2.4/nrf/dts/arm'
+     - 'C:/ncs/v3.2.4/nrf/dts'
+     - 'C:/ncs/v3.2.4/zephyr/include'
+     - 'C:/ncs/v3.2.4/zephyr/include/zephyr'
+     - 'C:/ncs/v3.2.4/zephyr/dts/common'
+     - 'C:/ncs/v3.2.4/zephyr/dts/vendor'
+     - 'C:/ncs/v3.2.4/zephyr/dts/rx'
+     - 'C:/ncs/v3.2.4/zephyr/dts/x86'
+     - 'C:/ncs/v3.2.4/zephyr/dts/xtensa'
+     - 'C:/ncs/v3.2.4/zephyr/dts/sparc'
+     - 'C:/ncs/v3.2.4/zephyr/dts/riscv'
+     - 'C:/ncs/v3.2.4/zephyr/dts/posix'
+     - 'C:/ncs/v3.2.4/zephyr/dts/arm64'
+     - 'C:/ncs/v3.2.4/zephyr/dts/arm'
+     - 'C:/ncs/v3.2.4/zephyr/dts/arc'
+     - 'C:/ncs/v3.2.4/zephyr/dts'
+    user-files:
+     - 'D:/study/Job_two_projects/BLE_SENSOR/mic_test/app.overlay'
+  kconfig:
+    files:
+     - 'C:/ncs/v3.2.4/zephyr/boards/nordic/nrf52833dk/nrf52833dk_nrf52833_defconfig'
+     - 'D:/study/Job_two_projects/BLE_SENSOR/mic_test/prj.conf'
+     - 'D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/mic_test/zephyr/misc/generated/extra_kconfig_options.conf'
+     - 'D:/study/Job_two_projects/BLE_SENSOR/mic_test/build/mic_test/zephyr/.config.sysbuild'
+    user-files:
+     - 'D:/study/Job_two_projects/BLE_SENSOR/mic_test/prj.conf'
+  toolchain:
+    name: 'zephyr'
+    path: 'C:/ncs/toolchains/fd21892d0f/opt/zephyr-sdk'
+  vendor-specific:
+    nordic:
+      svdfile: 'C:/ncs/v3.2.4/modules/hal/nordic/nrfx/bsp/stable/mdk/nrf52833.svd'
+  zephyr:
+    version: '4.2.99'
+    zephyr-base: 'C:/ncs/v3.2.4/zephyr'
+version: '0.1.0'
