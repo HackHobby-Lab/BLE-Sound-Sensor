@@ -1,0 +1,43 @@
+/* Sound Sensor V0.3 (NINA-B406 / nRF52833) — MAX9814 analog-mic overlay.
+ *
+ * Pin map (NINA module GPIO -> nRF pin, from NINA-B40 datasheet Table 6):
+ *   MOUTPUT     = GPIO_18 -> P0.02 = ADC AIN0   (MAX9814 analog output)
+ *   SDA         = GPIO_44 -> P0.27             (fuel gauge I2C)
+ *   SCL         = GPIO_43 -> P0.15             (fuel gauge I2C)
+ *   EN_CONTROLL = GPIO_5  -> P0.17  (driven in firmware, not here)
+ *   PAIR_BUTTON = GPIO_42 -> P0.26  (read in firmware, not here)
+ *
+ * The SAADC analog input (AIN0/P0.02) is selected in C via the channel
+ * config, so no pinctrl entry is needed for it — only the ADC node is enabled.
+ */
+
+&adc {
+	status = "okay";
+};
+
+/* Fuel-gauge I2C kept enabled so the (currently disabled) battery code
+ * still compiles and links. */
+&pinctrl {
+	i2c0_default_alt: i2c0_default_alt {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 27)>,
+				<NRF_PSEL(TWIM_SCL, 0, 15)>;
+		};
+	};
+
+	i2c0_sleep_alt: i2c0_sleep_alt {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 27)>,
+				<NRF_PSEL(TWIM_SCL, 0, 15)>;
+			low-power-enable;
+		};
+	};
+};
+
+&i2c0 {
+	status = "okay";
+	pinctrl-0 = <&i2c0_default_alt>;
+	pinctrl-1 = <&i2c0_sleep_alt>;
+	pinctrl-names = "default", "sleep";
+	clock-frequency = <100000>;
+};

@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "C:/ncs/work/mic_test/build/_sysbuild/sysbuild/images/CMakeFiles/mic_test"
+		},
+		{
+			"file" : "C:/ncs/work/mic_test/build/_sysbuild/sysbuild/images/CMakeFiles/mic_test.rule"
+		},
+		{
+			"file" : "C:/ncs/work/mic_test/build/_sysbuild/sysbuild/images/CMakeFiles/mic_test-complete.rule"
+		},
+		{
+			"file" : "C:/ncs/work/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-build.rule"
+		},
+		{
+			"file" : "C:/ncs/work/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-configure.rule"
+		},
+		{
+			"file" : "C:/ncs/work/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-download.rule"
+		},
+		{
+			"file" : "C:/ncs/work/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-install.rule"
+		},
+		{
+			"file" : "C:/ncs/work/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-mkdir.rule"
+		},
+		{
+			"file" : "C:/ncs/work/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-patch.rule"
+		},
+		{
+			"file" : "C:/ncs/work/mic_test/build/_sysbuild/sysbuild/images/mic_test-prefix/src/mic_test-stamp/mic_test-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"mic_test"
+		],
+		"name" : "mic_test"
+	}
+}

@@ -1,0 +1,7 @@
+default: mic_test
+build_dir: C:/ncs/work/mic_test/build
+domains:
+  - name: mic_test
+    build_dir: C:/ncs/work/mic_test/build/mic_test
+flash_order:
+  - mic_test

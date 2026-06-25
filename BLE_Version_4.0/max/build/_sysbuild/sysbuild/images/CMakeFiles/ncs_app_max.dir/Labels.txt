@@ -1,0 +1,13 @@
+# Target labels
+ ncs_app_max
+# Source files and their labels
+C:/ncs_app_max/build/_sysbuild/sysbuild/images/CMakeFiles/ncs_app_max
+C:/ncs_app_max/build/_sysbuild/sysbuild/images/CMakeFiles/ncs_app_max.rule
+C:/ncs_app_max/build/_sysbuild/sysbuild/images/CMakeFiles/ncs_app_max-complete.rule
+C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-build.rule
+C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-configure.rule
+C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-download.rule
+C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-install.rule
+C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-mkdir.rule
+C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-patch.rule
+C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-update.rule

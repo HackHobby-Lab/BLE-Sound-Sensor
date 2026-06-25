@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "C:/ncs_app_max/build/_sysbuild/sysbuild/images/CMakeFiles/ncs_app_max"
+		},
+		{
+			"file" : "C:/ncs_app_max/build/_sysbuild/sysbuild/images/CMakeFiles/ncs_app_max.rule"
+		},
+		{
+			"file" : "C:/ncs_app_max/build/_sysbuild/sysbuild/images/CMakeFiles/ncs_app_max-complete.rule"
+		},
+		{
+			"file" : "C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-build.rule"
+		},
+		{
+			"file" : "C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-configure.rule"
+		},
+		{
+			"file" : "C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-download.rule"
+		},
+		{
+			"file" : "C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-install.rule"
+		},
+		{
+			"file" : "C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-mkdir.rule"
+		},
+		{
+			"file" : "C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-patch.rule"
+		},
+		{
+			"file" : "C:/ncs_app_max/build/_sysbuild/sysbuild/images/ncs_app_max-prefix/src/ncs_app_max-stamp/ncs_app_max-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"ncs_app_max"
+		],
+		"name" : "ncs_app_max"
+	}
+}

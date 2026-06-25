@@ -1,0 +1,7 @@
+default: ncs_app_max
+build_dir: C:/ncs_app_max/build
+domains:
+  - name: ncs_app_max
+    build_dir: C:/ncs_app_max/build/ncs_app_max
+flash_order:
+  - ncs_app_max

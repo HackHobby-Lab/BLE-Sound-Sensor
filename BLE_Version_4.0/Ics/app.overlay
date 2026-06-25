@@ -1,0 +1,52 @@
+/* Sound Sensor V0.3 (NINA-B406 / nRF52833) overlay.
+ *
+ * Pin map (NINA module GPIO -> nRF pin, from NINA-B40 datasheet Table 6):
+ *   SCK  = GPIO_20 -> P0.31   (I2S bit clock)
+ *   WS   = GPIO_24 -> P0.30   (I2S word/LR clock)
+ *   SD   = GPIO_23 -> P0.29   (I2S data in)
+ *   SDA  = GPIO_44 -> P0.27   (fuel gauge I2C)
+ *   SCL  = GPIO_43 -> P0.15   (fuel gauge I2C)
+ *   EN_CONTROLL = GPIO_5 -> P0.17  (driven in firmware, not here)
+ *   PAIR_BUTTON = GPIO_42 -> P0.26 (left free)
+ */
+
+&pinctrl {
+	i2s0_default_alt: i2s0_default_alt {
+		group1 {
+			psels = <NRF_PSEL(I2S_SCK_M, 0, 31)>,
+				<NRF_PSEL(I2S_LRCK_M, 0, 30)>,
+				<NRF_PSEL(I2S_SDIN, 0, 29)>;
+		};
+	};
+
+	/* Fuel-gauge I2C: SDA = P0.27, SCL = P0.15 (real V0.3 board). */
+	i2c0_default_alt: i2c0_default_alt {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 27)>,
+				<NRF_PSEL(TWIM_SCL, 0, 15)>;
+		};
+	};
+
+	i2c0_sleep_alt: i2c0_sleep_alt {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 27)>,
+				<NRF_PSEL(TWIM_SCL, 0, 15)>;
+			low-power-enable;
+		};
+	};
+};
+
+&i2s0 {
+	status = "okay";
+	pinctrl-0 = <&i2s0_default_alt>;
+	pinctrl-names = "default";
+	clock-source = "PCLK32M_HFXO";
+};
+
+&i2c0 {
+	status = "okay";
+	pinctrl-0 = <&i2c0_default_alt>;
+	pinctrl-1 = <&i2c0_sleep_alt>;
+	pinctrl-names = "default", "sleep";
+	clock-frequency = <100000>;
+};
