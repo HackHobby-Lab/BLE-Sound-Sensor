@@ -1,8 +1,8 @@
-# Mic-Sense — Baby Cry Detector Firmware
+# Mic-Sense Baby Cry Detector Firmware
 
 Mic-Sense is a small battery-powered device that listens to a room, detects when a baby is crying, and sends an alert to a phone app over Bluetooth. This repository holds the device firmware (the program that runs on the chip).
 
-The device has **two different microphones** on the board, and there is **one firmware build for each**. They do the same job — they only differ in which microphone they read.
+The device has **two different microphones** on the board, and there is **one firmware build for each**. They do the same job they only differ in which microphone they read.
 
 | Build | Microphone | How it reads sound |
 |-------|-----------|--------------------|
@@ -21,7 +21,7 @@ Both builds talk to the same phone app in exactly the same way.
 4. It then sends an alert to the phone app, and keeps alerting every 3 seconds for 2 minutes.
 5. The phone app shows the live sound level and receives the cry alerts.
 
-> **Important:** This is a *loudness* detector. It alerts on **any** sound loud enough to cross the threshold — not only crying. It works on the assumption that the area near the baby is normally quiet.
+> **Important:** This is a *loudness* detector. It alerts on **any** sound loud enough to cross the threshold not only crying. It works on the assumption that the area near the baby is normally quiet.
 
 ---
 
@@ -30,8 +30,8 @@ Both builds talk to the same phone app in exactly the same way.
 - **Board:** Sound Sensor V0.3
 - **Main chip / module:** u-blox NINA-B406 (contains a Nordic nRF52833 Bluetooth chip)
 - **Microphones:**
-  - ICS-43434 — digital (I²S)
-  - MAX9814 — analog (read by the chip's ADC)
+  - ICS-43434 digital (I²S)
+  - MAX9814 analog (read by the chip's ADC)
 - **Other parts:** battery charger, fuel gauge (battery % meter), RGB LED, one main button, power-latch circuit
 - **Antenna:** built into the NINA module (no external antenna)
 
@@ -86,7 +86,7 @@ west build -b nrf52833dk/nrf52833 . --pristine --build-dir build
 Notes:
 - The build target is `nrf52833dk/nrf52833`. This is correct for **both** the development kit and the real board, because the NINA module uses the same nRF52833 chip.
 - A successful build prints a memory summary and creates `build/merged.hex`.
-- You may see a few harmless "defined but not used" warnings — these are fine to ignore.
+- You may see a few harmless "defined but not used" warnings these are fine to ignore.
 
 ---
 
@@ -103,7 +103,7 @@ Notes:
 5. Add the file `build/merged.hex`.
 6. Click **Erase & write**.
 
-The file is a "merged" hex, so it already knows where to go in memory — no address needed.
+The file is a "merged" hex, so it already knows where to go in memory no address needed.
 
 ---
 
@@ -134,17 +134,17 @@ The two microphones produce sound numbers on **different scales**, so each one n
 > **Note:** A self-calibration feature exists inside the firmware, but the current phone app does not have a Calibrate button wired to it yet, so calibration is **not used right now**. Instead, you set the alert level directly with the app's **Set Sound Threshold** slider. (Automatic or manual calibration is planned for a future version.)
 
 1. Flash the firmware and open RTT.
-2. Make some noise near the mic and confirm the `SPL` number **goes up** — this proves the mic is being read.
+2. Make some noise near the mic and confirm the `SPL` number **goes up** this proves the mic is being read.
 3. Open the phone app and connect to **Mic-Sense**. In RTT you should now see `stream_sub=1` and `alert_sub=1`.
 4. Watch the quiet-room `SPL` value, then make a loud, cry-like sound and note how high `SPL` climbs.
 5. In the app, drag the **Set Sound Threshold** slider to a value that sits comfortably between "quiet room" and "loud cry."
 6. Turn the **Alerts** toggle on and make sure the device shows **Connected**.
 
-That's it — a sound that crosses the threshold will now fire an alert.
+That's it a sound that crosses the threshold will now fire an alert.
 
 ### Typical threshold values
 
-These differ because the two mics have different sensitivity, so the right slider value is different for each. **Both are correct** — just set each one to fit its own range.
+These differ because the two mics have different sensitivity, so the right slider value is different for each. **Both are correct** just set each one to fit its own range.
 
 | Build | Quiet room (about) | Loud cry (about) | Good threshold (about) |
 |-------|--------------------|------------------|------------------------|
@@ -153,7 +153,7 @@ These differ because the two mics have different sensitivity, so the right slide
 
 ---
 
-## MAX9814 build — extra notes
+## MAX9814 build extra notes
 
 The analog mic has two small slider switches on the board that configure the mic itself (the firmware does not control these):
 
@@ -165,7 +165,7 @@ The analog mic has two small slider switches on the board that configure the mic
 
   More gain gives a wider, clearer gap between a quiet room and a cry. Pick the position that gives you a comfortable gap, then keep it fixed.
 
-> If you ever change the gain slider, the sound scale shifts — so re-check the threshold after moving it.
+> If you ever change the gain slider, the sound scale shifts so re-check the threshold after moving it.
 
 The MAX9814's analog output is wired to chip pin **P0.02 (ADC input AIN0)**. The firmware samples it at a steady 4,000 times per second and works out the loudness from that.
 
@@ -204,4 +204,4 @@ These are the connections the firmware relies on (NINA module pin → nRF chip p
 2. Flash `build/merged.hex` with the Programmer app over J-Link.
 3. Open RTT and confirm the sound level reacts to noise.
 4. Connect the phone app, set the **Set Sound Threshold** slider between quiet and loud, and turn on **Alerts**.
-5. Make a loud sound — the alert fires in the app.
+5. Make a loud sound the alert fires in the app.
